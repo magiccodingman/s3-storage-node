@@ -30,7 +30,7 @@ jobs:
       - name: Verify real mount barriers fail closed
         env:
           RUN_PRIVILEGED_TESTS: "1"
-        run: sudo --preserve-env=RUN_PRIVILEGED_TESTS,PYTHONPATH env PYTHONPATH="$GITHUB_WORKSPACE/src" python -m pytest -q tests/test_linux_fault_injection.py
+        run: sudo --preserve-env=RUN_PRIVILEGED_TESTS env PYTHONPATH="$GITHUB_WORKSPACE/src" "$pythonLocation/bin/python" -m pytest -q tests/test_linux_fault_injection.py
 
   docker:
     runs-on: ubuntu-latest
