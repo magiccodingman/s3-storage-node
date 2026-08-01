@@ -1,0 +1,38 @@
+services:
+  s3-storage-node:
+    image: ${S3_STORAGE_NODE_IMAGE:-magiccodingman/s3-storage-node:latest}
+    build:
+      context: .
+      args:
+        SEAWEEDFS_VERSION: ${SEAWEEDFS_VERSION:-4.40}
+    restart: unless-stopped
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor=unconfined
+    read_only: true
+    tmpfs:
+      - /run:size=128m,mode=0755
+      - /tmp:size=128m,mode=1777
+    ports:
+      - "${S3_PORT:-8333}:8333"
+      - "${HEALTH_PORT:-9090}:9090"
+    volumes:
+      - s3_storage_node_state:/var/lib/s3-storage-node
+      - ./config/config.toml:/etc/s3-storage-node/config.toml:ro
+    secrets:
+      - cifs_credentials
+      - s3_access_key
+      - s3_secret_key
+    stop_grace_period: 45s
+
+volumes:
+  s3_storage_node_state:
+
+secrets:
+  cifs_credentials:
+    file: ./secrets/cifs-credentials
+  s3_access_key:
+    file: ./secrets/s3-access-key
+  s3_secret_key:
+    file: ./secrets/s3-secret-key

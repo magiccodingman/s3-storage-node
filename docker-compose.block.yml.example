@@ -1,0 +1,4 @@
+services:
+  s3-storage-node:
+    devices:
+      - /dev/disk/by-id/replace-me:/dev/storage-data
