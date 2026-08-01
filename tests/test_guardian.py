@@ -22,6 +22,8 @@ def make_guardian() -> Guardian:
         probe_interval_seconds=1,
         full_probe_interval_seconds=60,
         s3_canary_enabled=True,
+        health_host="127.0.0.1",
+        health_port=9090,
         state_dir=None,
         runtime_dir=None,
         uid=10001,
@@ -132,6 +134,56 @@ def test_probe_results_are_published_to_health() -> None:
     assert guardian._run_probe.call_args_list[1].args == ("metadata", True)
 
 
+def test_mount_and_enroll_prepares_each_target_before_layout() -> None:
+    guardian = make_guardian()
+    guardian.config.active_targets = (SimpleNamespace(name="data", type="cifs", storage_root="/data"), SimpleNamespace(name="index", type="block", storage_root="/index"))
+    calls: list[tuple[str, str | None]] = []
+    guardian._run_helper = Mock(side_effect=lambda operation, target_name=None, **_kwargs: calls.append((operation, target_name)) or {})
+
+    guardian._mount_and_enroll_targets()
+
+    assert calls == [
+        ("mount", "data"),
+        ("prepare", "data"),
+        ("mount", "index"),
+        ("prepare", "index"),
+        ("prepare-layout", None),
+    ]
+
+
+def test_repair_targets_unmounts_managed_targets_in_reverse_and_skips_paths() -> None:
+    guardian = make_guardian()
+    guardian.config.active_targets = (
+        SimpleNamespace(name="data", type="cifs"),
+        SimpleNamespace(name="metadata", type="path"),
+        SimpleNamespace(name="index", type="block"),
+    )
+    calls: list[str] = []
+    guardian._run_helper = Mock(side_effect=lambda _operation, target_name, **_kwargs: calls.append(target_name) or {})
+
+    guardian._repair_targets()
+    assert calls == ["index", "data"]
+
+    calls.clear()
+    guardian._repair_targets(unmount_all=True)
+    assert calls == ["index", "metadata", "data"]
+
+
+def test_online_loop_runs_periodic_full_probe_and_canary(monkeypatch: pytest.MonkeyPatch) -> None:
+    guardian = make_guardian()
+    guardian.config.appliance.full_probe_interval_seconds = 0
+    guardian.haproxy = FakeProcess("haproxy", [], running=True)
+    guardian.processes = [FakeProcess("volume", [], running=True)]
+    events: list[str] = []
+    guardian._probe_targets = Mock(side_effect=lambda full: events.append(f"probe:{full}"))
+    guardian._run_s3_canary = Mock(side_effect=lambda: events.append("canary"))
+    monkeypatch.setattr(guardian, "_interruptible_sleep", lambda _seconds: setattr(guardian, "stopping", True))
+
+    guardian._online_loop()
+
+    assert events == ["probe:True", "canary"]
+
+
 def test_run_failure_stops_seaweed_before_repair(monkeypatch: pytest.MonkeyPatch) -> None:
     guardian = make_guardian()
     events: list[str] = []
@@ -153,6 +205,28 @@ def test_run_failure_stops_seaweed_before_repair(monkeypatch: pytest.MonkeyPatch
     assert events.index("stop-seaweed") < events.index("repair:False")
     assert guardian.health.snapshot()["failures_total"] == 1
     assert guardian.health.snapshot()["recovery_attempts"] == 1
+
+
+def test_recovery_backoff_doubles_until_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    guardian = make_guardian()
+    sleeps: list[int] = []
+    monkeypatch.setattr(guardian, "_install_signals", lambda: None)
+    monkeypatch.setattr(guardian, "_prepare_directories", lambda: None)
+    monkeypatch.setattr("s3_storage_node.guardian.start_server", lambda *_args: None)
+    monkeypatch.setattr(guardian, "_ensure_haproxy", lambda: None)
+    monkeypatch.setattr(guardian, "_mount_and_enroll_targets", lambda: (_ for _ in ()).throw(StorageError("still down")))
+    monkeypatch.setattr(guardian, "_stop_seaweed", lambda: None)
+    monkeypatch.setattr(guardian, "_repair_targets", lambda unmount_all=False: None)
+
+    def record_sleep(seconds: int) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 4:
+            guardian.stopping = True
+
+    monkeypatch.setattr(guardian, "_interruptible_sleep", record_sleep)
+
+    assert guardian.run() == 0
+    assert sleeps == [1, 2, 4, 4]
 
 
 def test_timed_out_helper_is_killed_and_quarantined(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -182,7 +256,7 @@ def test_timed_out_helper_is_killed_and_quarantined(monkeypatch: pytest.MonkeyPa
     assert guardian.helper_children == [helper]
 
 
-def test_previous_blocked_helper_prevents_overlapping_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_previous_blocked_helper_prevents_overlapping_recovery() -> None:
     guardian = make_guardian()
     blocked = Mock()
     blocked.poll.return_value = None
