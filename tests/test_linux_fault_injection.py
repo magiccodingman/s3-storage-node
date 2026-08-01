@@ -43,7 +43,8 @@ def assert_unprivileged_write_succeeds(path: Path) -> None:
 def test_mode_zero_barrier_rejects_unprivileged_local_fallback(tmp_path: Path) -> None:
     allow_unprivileged_traversal(tmp_path)
     control = tmp_path / "control"
-    control.mkdir(mode=0o777)
+    control.mkdir()
+    control.chmod(0o777)
     assert_unprivileged_write_succeeds(control / "control.dat")
 
     barrier = tmp_path / "data"
