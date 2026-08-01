@@ -1,0 +1,12 @@
+# Replace the [storage.data] section in config.toml with this example.
+[storage.data]
+type = "block"
+device = "/dev/storage-data"
+expected_uuid = "11111111-2222-3333-4444-555555555555"
+expected_filesystem = "xfs"
+mountpoint = "/run/s3-storage-node/mounts/data"
+subdirectory = "seaweedfs"
+sentinel_id = "archive-disk-01"
+allow_initialize = false
+min_free_bytes = 10737418240
+mount_options = ["noatime"]
