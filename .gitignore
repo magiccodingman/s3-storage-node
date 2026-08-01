@@ -1,0 +1,8 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+.env
+config/config.toml
+secrets/cifs-credentials
+secrets/s3-access-key
+secrets/s3-secret-key

@@ -1,0 +1,97 @@
+[appliance]
+name = "storagebox-node-01"
+state_dir = "/var/lib/s3-storage-node"
+runtime_dir = "/run/s3-storage-node"
+health_host = "0.0.0.0"
+health_port = 9090
+probe_interval_seconds = 5
+full_probe_interval_seconds = 60
+probe_timeout_seconds = 4
+startup_timeout_seconds = 30
+shutdown_grace_seconds = 20
+recovery_initial_seconds = 5
+recovery_max_seconds = 60
+s3_canary_enabled = true
+
+# The bulk SeaweedFS .dat volume storage.
+[storage.data]
+type = "cifs"
+source = "//u123456.your-storagebox.de/backup"
+mountpoint = "/run/s3-storage-node/mounts/data"
+subdirectory = "seaweedfs"
+credentials_file = "/run/secrets/cifs_credentials"
+sentinel_id = "replace-with-a-stable-unique-id"
+allow_initialize = false
+min_free_bytes = 10737418240
+mount_options = [
+  "vers=3.1.1",
+  "uid=10001",
+  "gid=10001",
+  "forceuid",
+  "forcegid",
+  "file_mode=0660",
+  "dir_mode=0770",
+  "noperm",
+  "noserverino",
+  "iocharset=utf8",
+  "echo_interval=15",
+  "actimeo=1"
+]
+
+# Local persistent filer metadata. This can instead be another cifs/block/path target.
+[storage.metadata]
+type = "path"
+mountpoint = "/var/lib/s3-storage-node/metadata"
+subdirectory = ""
+sentinel_id = "metadata-local-01"
+allow_initialize = true
+min_free_bytes = 1073741824
+
+# Fast volume indexes. This can instead point to data if separation is not desired.
+[storage.index]
+type = "path"
+mountpoint = "/var/lib/s3-storage-node/index"
+subdirectory = ""
+sentinel_id = "index-local-01"
+allow_initialize = true
+min_free_bytes = 1073741824
+
+[metadata]
+backend = "embedded"
+target = "metadata"
+directory = "filer"
+
+[index]
+target = "index"
+directory = "volume-indexes"
+
+[seaweed]
+volume_directory = "volumes"
+master_port = 9333
+volume_port = 8080
+filer_port = 8888
+s3_internal_port = 18333
+volume_max = 0
+volume_size_limit_mb = 30000
+default_replication = "000"
+filer_max_mb = 16
+data_center = ""
+rack = ""
+disk_type = "archive"
+encrypt_volume_data = false
+master_extra_args = []
+volume_extra_args = []
+filer_extra_args = []
+s3_extra_args = []
+
+[s3]
+host = "0.0.0.0"
+port = 8333
+domain_name = ""
+allowed_origins = "*"
+external_url = ""
+auth_mode = "static"
+access_key_file = "/run/secrets/s3_access_key"
+secret_key_file = "/run/secrets/s3_secret_key"
+tls_mode = "off"
+tls_pem_file = ""
