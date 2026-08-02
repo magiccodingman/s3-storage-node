@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import http.client
+import time
 from datetime import datetime, timezone
 from urllib.parse import quote, urlsplit
 
@@ -61,20 +62,12 @@ def _request(
         connection.close()
 
 
-def run_canary(
+def _run_canary_once(
     port: int,
     access_key: str | None,
     secret_key: str | None,
-    *,
-    external_url: str = "",
+    signature_host: str,
 ) -> None:
-    signature_host = f"127.0.0.1:{port}"
-    if external_url:
-        parsed = urlsplit(external_url)
-        if not parsed.netloc:
-            raise S3CheckError(f"invalid external_url for S3 canary: {external_url}")
-        signature_host = parsed.netloc
-
     bucket = "s3-storage-node-health"
     key = "canary"
     data = b"s3-storage-node-canary-v1"
@@ -91,3 +84,32 @@ def run_canary(
     status, body = _request(port, "DELETE", f"/{bucket}/{key}", b"", access_key, secret_key, signature_host)
     if status not in {200, 204}:
         raise S3CheckError(f"DELETE canary failed with HTTP {status}: {body[:200]!r}")
+
+
+def run_canary(
+    port: int,
+    access_key: str | None,
+    secret_key: str | None,
+    *,
+    external_url: str = "",
+    retry_seconds: float = 15.0,
+    retry_interval_seconds: float = 1.0,
+) -> None:
+    signature_host = f"127.0.0.1:{port}"
+    if external_url:
+        parsed = urlsplit(external_url)
+        if not parsed.netloc:
+            raise S3CheckError(f"invalid external_url for S3 canary: {external_url}")
+        signature_host = parsed.netloc
+
+    deadline = time.monotonic() + max(0.0, retry_seconds)
+    last_error: S3CheckError | None = None
+    while True:
+        try:
+            _run_canary_once(port, access_key, secret_key, signature_host)
+            return
+        except S3CheckError as exc:
+            last_error = exc
+            if time.monotonic() >= deadline:
+                raise last_error
+            time.sleep(min(retry_interval_seconds, max(0.0, deadline - time.monotonic())))
