@@ -77,7 +77,9 @@ default_replication = "000"
 filer_max_mb = 16
 data_center = ""
 rack = ""
-disk_type = "archive"
+# Leave empty for the normal/default disk tier. Set a custom value only when
+# clients and placement policies explicitly target that SeaweedFS disk type.
+disk_type = ""
 encrypt_volume_data = false
 master_extra_args = []
 volume_extra_args = []
