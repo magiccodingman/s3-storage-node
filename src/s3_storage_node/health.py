@@ -72,13 +72,21 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json(404, {"error": "not found"})
 
+    def _write(self, body: bytes) -> None:
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # Health clients such as HAProxy may close immediately after reading
+            # the status line. This is expected and should not flood appliance logs.
+            return
+
     def _json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, sort_keys=True).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        self._write(body)
 
     def _metrics(self, snapshot: dict[str, Any]) -> None:
         lines = [
@@ -100,7 +108,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain; version=0.0.4")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        self._write(body)
 
 
 def start_server(host: str, port: int, state: HealthState) -> ThreadingHTTPServer:
