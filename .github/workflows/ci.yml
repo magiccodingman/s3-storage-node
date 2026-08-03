@@ -16,8 +16,36 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: python -m pip install --upgrade pip pytest
+      - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt pytest
       - run: PYTHONPATH=src ./scripts/test.sh
+
+  postgres-lease-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: lease_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d lease_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt pytest
+      - name: Verify distributed ownership and monotonic fencing epochs
+        env:
+          RUN_POSTGRES_LEASE_INTEGRATION: "1"
+          WRITER_LEASE_TEST_DSN: "postgresql://postgres:postgres@127.0.0.1:5432/lease_test"
+        run: PYTHONPATH=src python -m pytest -q tests/test_postgres_lease_integration.py
 
   linux-fault-injection:
     runs-on: ubuntu-latest
@@ -26,7 +54,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: python -m pip install --upgrade pip pytest
+      - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt pytest
       - name: Install namespace and SSHFS integration tools
         run: sudo apt-get update && sudo apt-get install -y iproute2 iptables openssh-server sshfs
       - name: Verify real mount barriers fail closed
@@ -67,3 +95,5 @@ jobs:
             -c 'unshare --mount --net -- true && ip link add s3-ci-a type veth peer name s3-ci-b && ip link del s3-ci-a'
       - name: Verify SSHFS tooling is present
         run: docker run --rm --entrypoint /usr/bin/sshfs s3-storage-node:ci --version
+      - name: Verify PostgreSQL lease client is importable
+        run: docker run --rm --entrypoint python3 s3-storage-node:ci -c 'import psycopg; print(psycopg.__version__)'
