@@ -16,12 +16,32 @@ recovery_probe_interval_seconds = 2
 recovery_successes_required = 3
 
 # Run each SeaweedFS generation and its managed storage mount inside isolated
-# mount/network namespaces. Exclusive transport failover requires this mode.
+# mount/network namespaces. Exclusive transport failover and distributed writer
+# leases both require this mode.
 worker_fencing_mode = "namespace"
 worker_host_address = "169.254.254.1/30"
 worker_address = "169.254.254.2/30"
 worker_gateway = "169.254.254.1"
 s3_canary_enabled = true
+
+# The local flock is always acquired. This optional second layer coordinates one
+# dataset writer across separate hosts/state directories. Keep backend="local"
+# for a standalone node. For PostgreSQL, mount docker-compose.postgres-lease.yml,
+# change backend to "postgres", and provide the DSN secret.
+[writer_lease]
+backend = "local"
+lease_name = "replace-with-the-data-sentinel-id"
+node_id = "storagebox-node-01"
+ttl_seconds = 15
+renew_interval_seconds = 5
+retry_interval_seconds = 1
+fence_margin_seconds = 2
+takeover_delay_seconds = 5
+connect_timeout_seconds = 5
+# postgres_dsn_file = "/run/secrets/writer_lease_postgres_dsn"
+# postgres_schema = "public"
+# postgres_table = "s3_storage_node_writer_leases"
+# auto_create = true
 
 # The canonical/preferred bulk SeaweedFS .dat transport.
 [storage.data]
