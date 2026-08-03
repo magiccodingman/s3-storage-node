@@ -11,6 +11,11 @@ startup_timeout_seconds = 30
 shutdown_grace_seconds = 20
 recovery_initial_seconds = 5
 recovery_max_seconds = 60
+# Keep a recovered node withdrawn until repeated full probes and the S3 canary
+# remain healthy across this window.
+recovery_stability_seconds = 15
+recovery_probe_interval_seconds = 2
+recovery_successes_required = 3
 s3_canary_enabled = true
 
 # The bulk SeaweedFS .dat volume storage.
