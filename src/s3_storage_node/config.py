@@ -8,6 +8,7 @@ from .config_helpers import ConfigError, _bool, _int, _positive, _relative_path,
 from .config_target import _parse_target
 from .config_types import ApplianceConfig, Config, IndexConfig, MetadataConfig, S3Config, SeaweedConfig, TargetConfig
 
+
 def load_config(path: str | os.PathLike[str]) -> Config:
     config_path = Path(path)
     try:
@@ -40,11 +41,21 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         shutdown_grace_seconds=_int(appliance_raw.get("shutdown_grace_seconds"), "appliance.shutdown_grace_seconds", 20),
         recovery_initial_seconds=_int(appliance_raw.get("recovery_initial_seconds"), "appliance.recovery_initial_seconds", 5),
         recovery_max_seconds=_int(appliance_raw.get("recovery_max_seconds"), "appliance.recovery_max_seconds", 60),
+        recovery_stability_seconds=_int(
+            appliance_raw.get("recovery_stability_seconds"), "appliance.recovery_stability_seconds", 15
+        ),
+        recovery_probe_interval_seconds=_int(
+            appliance_raw.get("recovery_probe_interval_seconds"), "appliance.recovery_probe_interval_seconds", 2
+        ),
+        recovery_successes_required=_int(
+            appliance_raw.get("recovery_successes_required"), "appliance.recovery_successes_required", 3
+        ),
         s3_canary_enabled=_bool(appliance_raw.get("s3_canary_enabled"), "appliance.s3_canary_enabled", True),
     )
     for field_name in (
         "health_port", "probe_interval_seconds", "full_probe_interval_seconds", "probe_timeout_seconds",
         "startup_timeout_seconds", "shutdown_grace_seconds", "recovery_initial_seconds", "recovery_max_seconds",
+        "recovery_stability_seconds", "recovery_probe_interval_seconds", "recovery_successes_required",
     ):
         _positive(getattr(appliance, field_name), f"appliance.{field_name}")
     if appliance.recovery_initial_seconds > appliance.recovery_max_seconds:
