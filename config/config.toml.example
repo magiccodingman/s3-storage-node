@@ -23,6 +23,10 @@ credentials_file = "/run/secrets/cifs_credentials"
 sentinel_id = "replace-with-a-stable-unique-id"
 allow_initialize = false
 min_free_bytes = 10737418240
+# mount.cifs defaults to soft; set the policy explicitly so the appliance never
+# relies on an invisible kernel default. Hard mode can leave I/O blocked until
+# the server returns and should be enabled only after failure testing.
+io_failure_policy = "soft"
 mount_options = [
   "vers=3.1.1",
   "uid=10001",

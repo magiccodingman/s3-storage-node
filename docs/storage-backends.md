@@ -7,6 +7,7 @@ CIFS is the primary network-filesystem backend in version 1. It provides direct 
 Recommended baseline options:
 
 ```toml
+io_failure_policy = "soft"
 mount_options = [
   "vers=3.1.1",
   "uid=10001",
@@ -23,7 +24,16 @@ mount_options = [
 ]
 ```
 
-Adjust protocol version and server-specific options as needed. `soft` is deliberately not included because early I/O failure can create partial-write behavior beneath a storage engine.
+Adjust protocol version and server-specific options as needed.
+
+`mount.cifs` uses `soft` behavior by default, so omitting both `soft` and `hard` did not avoid soft semantics. The appliance now models this explicitly with `io_failure_policy` and always includes the selected policy in the mount command:
+
+- `soft` is the default and preserves the existing runtime behavior. Server failure can return an error to SeaweedFS, allowing the guardian to withdraw the endpoint and begin recovery. An interrupted storage operation must still be treated as failed and is covered by the existing fail-closed lifecycle.
+- `hard` keeps retrying I/O when the server is unavailable. This can avoid early application-visible errors, but it can also trap SeaweedFS in blocked kernel I/O until the server returns. The guardian will not start an overlapping SeaweedFS generation while an old process remains alive.
+
+Use `hard` only after testing the exact kernel, server, and outage modes used by the deployment. Put the choice in `io_failure_policy`, not `mount_options`. A legacy configuration containing one of the raw flags is canonicalized; contradictory policies are rejected.
+
+The configured policy is included in storage health results as `configured_io_failure_policy`.
 
 The guardian checks both `/proc/self/mountinfo` and active I/O. A mount that remains listed but returns `Host is down`, stalls, or fails `fsync` is treated as offline.
 

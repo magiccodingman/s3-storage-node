@@ -83,6 +83,22 @@ def verify_block_identity(target: TargetConfig) -> None:
         raise StorageError(f"filesystem mismatch for {target.name}: expected {target.expected_filesystem}, got {values.get('TYPE', '<none>')}")
 
 
+def _cifs_mount_options(target: TargetConfig) -> tuple[str, ...]:
+    policy = target.effective_io_failure_policy
+    if policy not in {"soft", "hard"}:
+        raise StorageError(f"invalid CIFS I/O failure policy for {target.name}: {policy}")
+    conflicting = [
+        option
+        for option in target.mount_options
+        if option.partition("=")[0].strip().lower() in {"soft", "hard"}
+    ]
+    if conflicting:
+        raise StorageError(
+            f"raw CIFS I/O failure options remain for {target.name}; use io_failure_policy instead"
+        )
+    return (policy, *target.mount_options)
+
+
 def mount_target(target: TargetConfig) -> None:
     if target.type == "path":
         if not target.mountpoint.exists():
@@ -95,7 +111,7 @@ def mount_target(target: TargetConfig) -> None:
 
     prepare_barrier(target)
     if target.type == "cifs":
-        options = [f"credentials={target.credentials_file}", *target.mount_options]
+        options = [f"credentials={target.credentials_file}", *_cifs_mount_options(target)]
         _run(["mount", "-t", "cifs", target.source, str(target.mountpoint), "-o", ",".join(options)], timeout=30)
     elif target.type == "block":
         verify_block_identity(target)
@@ -246,4 +262,11 @@ def probe_target(target: TargetConfig, full: bool = False) -> dict[str, int | st
             except FileNotFoundError:
                 pass
 
-    return {"free_bytes": free_bytes, "total_bytes": total_bytes, "path": str(target.storage_root)}
+    result: dict[str, int | str] = {
+        "free_bytes": free_bytes,
+        "total_bytes": total_bytes,
+        "path": str(target.storage_root),
+    }
+    if target.type == "cifs":
+        result["configured_io_failure_policy"] = target.effective_io_failure_policy
+    return result
