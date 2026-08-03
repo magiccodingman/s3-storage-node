@@ -42,8 +42,13 @@ Common settings:
 ```toml
 source = "//server/share"
 credentials_file = "/run/secrets/cifs_credentials"
+io_failure_policy = "soft"
 mount_options = ["vers=3.1.1", "uid=10001", "gid=10001"]
 ```
+
+`io_failure_policy` accepts `soft` or `hard` and defaults explicitly to `soft`. This preserves the appliance's existing behavior while avoiding reliance on the kernel client's invisible default. With `soft`, a failed server can return I/O errors to SeaweedFS so the guardian can withdraw and repair the node. With `hard`, I/O may remain blocked until the server returns, including cases where a SeaweedFS process cannot be terminated promptly. Use `hard` only after testing the exact kernel, server, and failure modes used in production.
+
+Do not also put `soft` or `hard` in `mount_options`. Existing configurations that contain one of those legacy flags are accepted and canonicalized into `io_failure_policy`; contradictory or duplicate policies are rejected.
 
 Credentials use `mount.cifs` format:
 
