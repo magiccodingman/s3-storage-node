@@ -53,9 +53,9 @@ class HealthState:
         with self._lock:
             self.recovery_stable_since = value
 
-    def set_writer(self, *, held: bool, scope: str = "local", owner: str = "") -> None:
+    def set_writer(self, *, held: bool, scope: str = "local", owner: str = "", **details: Any) -> None:
         with self._lock:
-            self.writer = {"scope": scope, "held": held, "owner": owner}
+            self.writer = {"scope": scope, "held": held, "owner": owner, **details}
 
     def set_generation(self, values: dict[str, Any]) -> None:
         with self._lock:
@@ -131,6 +131,11 @@ class Handler(BaseHTTPRequestHandler):
         return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
     def _metrics(self, snapshot: dict[str, Any]) -> None:
+        writer = snapshot["writer"]
+        writer_backend = self._label(writer.get("backend", "local"))
+        writer_scope = self._label(writer.get("scope", "local"))
+        writer_lease = self._label(writer.get("lease_name", ""))
+        writer_node = self._label(writer.get("node_id", writer.get("owner", "")))
         lines = [
             "# HELP s3_storage_node_ready Whether the appliance can safely serve S3 traffic.",
             "# TYPE s3_storage_node_ready gauge",
@@ -144,7 +149,23 @@ class Handler(BaseHTTPRequestHandler):
             "# TYPE s3_storage_node_last_probe_duration_seconds gauge",
             f"s3_storage_node_last_probe_duration_seconds {snapshot['last_probe_duration_seconds']}",
             "# TYPE s3_storage_node_writer_lease_held gauge",
-            f"s3_storage_node_writer_lease_held {1 if snapshot['writer'].get('held') else 0}",
+            f"s3_storage_node_writer_lease_held {1 if writer.get('held') else 0}",
+            "# TYPE s3_storage_node_writer_lease_healthy gauge",
+            f"s3_storage_node_writer_lease_healthy {1 if writer.get('healthy', writer.get('held')) else 0}",
+            "# TYPE s3_storage_node_writer_fencing_token gauge",
+            f"s3_storage_node_writer_fencing_token {writer.get('fencing_token', 0)}",
+            "# TYPE s3_storage_node_writer_lease_ttl_remaining_seconds gauge",
+            f"s3_storage_node_writer_lease_ttl_remaining_seconds {writer.get('ttl_remaining_seconds', 0)}",
+            "# TYPE s3_storage_node_writer_lease_renewals_total counter",
+            f"s3_storage_node_writer_lease_renewals_total {writer.get('renewals_total', 0)}",
+            "# TYPE s3_storage_node_writer_lease_renewal_failures_total counter",
+            f"s3_storage_node_writer_lease_renewal_failures_total {writer.get('renewal_failures_total', 0)}",
+            "# TYPE s3_storage_node_writer_lease_takeover_blocked gauge",
+            f"s3_storage_node_writer_lease_takeover_blocked {1 if writer.get('takeover_blocked') else 0}",
+            (
+                "s3_storage_node_writer_lease_info"
+                f'{{backend="{writer_backend}",scope="{writer_scope}",lease="{writer_lease}",node="{writer_node}"}} 1'
+            ),
             "# TYPE s3_storage_node_generation gauge",
             f"s3_storage_node_generation {snapshot['generation'].get('id', 0)}",
             "# TYPE s3_storage_node_generation_fenced gauge",
