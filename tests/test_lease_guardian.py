@@ -15,7 +15,7 @@ def bare_guardian() -> Guardian:
     guardian.writer_lease_config = SimpleNamespace(
         backend="postgres", lease_name="dataset-a", node_id="node-a"
     )
-    guardian.writer_epoch = Mock()
+    guardian.writer_epoch = Mock(unsafe=True)
     guardian.writer_epoch.fencing_token = 41
     guardian.writer_epoch.snapshot.return_value = {
         "backend": "postgres",
