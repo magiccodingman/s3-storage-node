@@ -16,6 +16,8 @@ RUN apt-get update \
        cifs-utils \
        e2fsprogs \
        haproxy \
+       iproute2 \
+       iptables \
        python3 \
        tini \
        util-linux \

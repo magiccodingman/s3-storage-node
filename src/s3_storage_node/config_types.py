@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ipaddress
 from pathlib import Path
 
 
@@ -56,6 +57,10 @@ class ApplianceConfig:
     recovery_probe_interval_seconds: int = 2
     recovery_successes_required: int = 3
     s3_canary_enabled: bool = True
+    worker_fencing_mode: str = "disabled"
+    worker_host_address: str = "169.254.254.1/30"
+    worker_address: str = "169.254.254.2/30"
+    worker_gateway: str = "169.254.254.1"
 
 
 @dataclass(frozen=True)
@@ -155,3 +160,9 @@ class Config:
     @property
     def index_path(self) -> Path:
         return self.targets[self.index.target].storage_root / self.index.directory
+
+    @property
+    def worker_endpoint_host(self) -> str:
+        if self.appliance.worker_fencing_mode != "namespace":
+            return "127.0.0.1"
+        return str(ipaddress.ip_interface(self.appliance.worker_address).ip)

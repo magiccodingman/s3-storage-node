@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 import tomllib
 from pathlib import Path
@@ -26,6 +27,27 @@ def load_config(path: str | os.PathLike[str]) -> Config:
     if state_dir == runtime_dir or state_dir.is_relative_to(runtime_dir):
         raise ConfigError("appliance.state_dir must not be inside the ephemeral runtime_dir")
 
+    fencing_mode = _string(appliance_raw.get("worker_fencing_mode"), "appliance.worker_fencing_mode", "disabled").lower()
+    if fencing_mode not in {"disabled", "namespace"}:
+        raise ConfigError("appliance.worker_fencing_mode must be disabled or namespace")
+    host_address = _string(appliance_raw.get("worker_host_address"), "appliance.worker_host_address", "169.254.254.1/30")
+    worker_address = _string(appliance_raw.get("worker_address"), "appliance.worker_address", "169.254.254.2/30")
+    gateway = _string(appliance_raw.get("worker_gateway"), "appliance.worker_gateway", "169.254.254.1")
+    try:
+        host_interface = ipaddress.ip_interface(host_address)
+        worker_interface = ipaddress.ip_interface(worker_address)
+        gateway_address = ipaddress.ip_address(gateway)
+    except ValueError as exc:
+        raise ConfigError(f"invalid worker namespace address: {exc}") from exc
+    if host_interface.version != 4 or worker_interface.version != 4 or gateway_address.version != 4:
+        raise ConfigError("worker namespace addresses must be IPv4")
+    if host_interface.network != worker_interface.network:
+        raise ConfigError("worker_host_address and worker_address must share one subnet")
+    if host_interface.ip == worker_interface.ip:
+        raise ConfigError("worker_host_address and worker_address must use different addresses")
+    if gateway_address != host_interface.ip:
+        raise ConfigError("worker_gateway must equal the worker_host_address IP")
+
     appliance = ApplianceConfig(
         name=_string(appliance_raw.get("name"), "appliance.name", "s3-storage-node"),
         state_dir=state_dir,
@@ -41,23 +63,22 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         shutdown_grace_seconds=_int(appliance_raw.get("shutdown_grace_seconds"), "appliance.shutdown_grace_seconds", 20),
         recovery_initial_seconds=_int(appliance_raw.get("recovery_initial_seconds"), "appliance.recovery_initial_seconds", 5),
         recovery_max_seconds=_int(appliance_raw.get("recovery_max_seconds"), "appliance.recovery_max_seconds", 60),
-        recovery_stability_seconds=_int(
-            appliance_raw.get("recovery_stability_seconds"), "appliance.recovery_stability_seconds", 15
-        ),
-        recovery_probe_interval_seconds=_int(
-            appliance_raw.get("recovery_probe_interval_seconds"), "appliance.recovery_probe_interval_seconds", 2
-        ),
-        recovery_successes_required=_int(
-            appliance_raw.get("recovery_successes_required"), "appliance.recovery_successes_required", 3
-        ),
+        recovery_stability_seconds=_int(appliance_raw.get("recovery_stability_seconds"), "appliance.recovery_stability_seconds", 15),
+        recovery_probe_interval_seconds=_int(appliance_raw.get("recovery_probe_interval_seconds"), "appliance.recovery_probe_interval_seconds", 2),
+        recovery_successes_required=_int(appliance_raw.get("recovery_successes_required"), "appliance.recovery_successes_required", 3),
         s3_canary_enabled=_bool(appliance_raw.get("s3_canary_enabled"), "appliance.s3_canary_enabled", True),
+        worker_fencing_mode=fencing_mode,
+        worker_host_address=host_address,
+        worker_address=worker_address,
+        worker_gateway=gateway,
     )
     for field_name in (
         "health_port", "probe_interval_seconds", "full_probe_interval_seconds", "probe_timeout_seconds",
         "startup_timeout_seconds", "shutdown_grace_seconds", "recovery_initial_seconds", "recovery_max_seconds",
-        "recovery_stability_seconds", "recovery_probe_interval_seconds", "recovery_successes_required",
+        "recovery_probe_interval_seconds", "recovery_successes_required",
     ):
         _positive(getattr(appliance, field_name), f"appliance.{field_name}")
+    _positive(appliance.recovery_stability_seconds, "appliance.recovery_stability_seconds")
     if appliance.recovery_initial_seconds > appliance.recovery_max_seconds:
         raise ConfigError("appliance.recovery_initial_seconds may not exceed recovery_max_seconds")
 
@@ -70,6 +91,9 @@ def load_config(path: str | os.PathLike[str]) -> Config:
             if not isinstance(storage_raw[name], dict):
                 raise ConfigError(f"[storage.{name}] must be a table")
             targets[name] = _parse_target(name, storage_raw[name], runtime_dir)
+
+    if appliance.worker_fencing_mode == "namespace" and targets["data"].type != "cifs":
+        raise ConfigError("appliance.worker_fencing_mode=namespace currently requires storage.data.type=cifs")
 
     for target in targets.values():
         if target.type == "path" and target.allow_initialize:
@@ -189,14 +213,7 @@ def load_config(path: str | os.PathLike[str]) -> Config:
     if len(ports) != len(set(ports)):
         raise ConfigError("appliance and SeaweedFS ports must be unique")
 
-    config = Config(
-        appliance=appliance,
-        targets=targets,
-        metadata=metadata,
-        index=index,
-        seaweed=seaweed,
-        s3=s3,
-    )
+    config = Config(appliance=appliance, targets=targets, metadata=metadata, index=index, seaweed=seaweed, s3=s3)
 
     active_mountpoints: dict[Path, str] = {}
     for target in config.active_targets:
@@ -209,10 +226,7 @@ def load_config(path: str | os.PathLike[str]) -> Config:
             )
         active_mountpoints[resolved] = target.name
 
-    role_paths = {
-        "volume": config.volume_path.resolve(strict=False),
-        "index": config.index_path.resolve(strict=False),
-    }
+    role_paths = {"volume": config.volume_path.resolve(strict=False), "index": config.index_path.resolve(strict=False)}
     if config.metadata.backend == "embedded":
         role_paths["metadata"] = config.metadata_path.resolve(strict=False)
     seen_roles: dict[Path, str] = {}

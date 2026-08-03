@@ -7,7 +7,7 @@ import urllib.error
 import urllib.request
 
 from .config import ConfigError, load_config
-from .guardian import run_guardian
+from .generation_guardian import run_guardian
 from .storage import (
     StorageError,
     mount_target,
