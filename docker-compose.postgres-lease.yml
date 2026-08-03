@@ -1,0 +1,11 @@
+services:
+  s3-storage-node:
+    secrets:
+      - cifs_credentials
+      - s3_access_key
+      - s3_secret_key
+      - writer_lease_postgres_dsn
+
+secrets:
+  writer_lease_postgres_dsn:
+    file: ./secrets/writer-lease-postgres-dsn
