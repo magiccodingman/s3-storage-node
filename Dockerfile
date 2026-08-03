@@ -10,6 +10,7 @@ LABEL org.opencontainers.image.title="S3 Storage Node" \
       org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.licenses="Apache-2.0"
 
+COPY requirements.txt /tmp/requirements.txt
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates \
@@ -21,10 +22,15 @@ RUN apt-get update \
        iptables \
        openssh-client \
        python3 \
+       python3-venv \
        sshfs \
        tini \
        util-linux \
        xfsprogs \
+    && python3 -m venv /opt/s3-storage-node/venv \
+    && /opt/s3-storage-node/venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/s3-storage-node/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt \
+    && rm -f /tmp/requirements.txt \
     && printf 'user_allow_other\n' > /etc/fuse.conf \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 seaweed \
@@ -36,7 +42,8 @@ COPY --from=seaweedfs /usr/bin/weed /usr/local/bin/weed
 COPY src/ /opt/s3-storage-node/src/
 COPY docker-entrypoint.sh /usr/local/bin/s3-storage-node
 
-ENV PYTHONPATH=/opt/s3-storage-node/src \
+ENV PATH=/opt/s3-storage-node/venv/bin:${PATH} \
+    PYTHONPATH=/opt/s3-storage-node/src \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     S3_STORAGE_NODE_CONFIG=/etc/s3-storage-node/config.toml \
