@@ -1,57 +1,35 @@
 from __future__ import annotations
 
-import errno
 import json
 import os
 import subprocess
-import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from .config import TargetConfig
+from .cifs_transport import (
+    CifsTransportError,
+    cifs_mount_options as _cifs_mount_options,
+    cifs_mount_profiles as _cifs_mount_profiles,
+    certify_cifs_transport as _certify_cifs_transport,
+    is_capability_failure,
+    parse_cifs_debug_data,
+    parse_cifs_stats,
+)
+from .config_types import TargetConfig
+from .durability import append_durability_probe as _append_durability_probe
+from .durability import fsync_directory, temporary_durability_probe
+from .mounts import MountInfo, decode_mountinfo_path, find_mount, read_mountinfo
 
 
 class StorageError(RuntimeError):
     pass
 
 
-@dataclass(frozen=True)
-class MountInfo:
-    mountpoint: str
-    filesystem: str
-    source: str
-
-
-def decode_mountinfo_path(value: str) -> str:
-    return value.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
-
-
-def read_mountinfo(path: str = "/proc/self/mountinfo") -> list[MountInfo]:
-    entries: list[MountInfo] = []
-    with open(path, "r", encoding="utf-8") as handle:
-        for line in handle:
-            before, separator, after = line.rstrip("\n").partition(" - ")
-            if not separator:
-                continue
-            left = before.split()
-            right = after.split()
-            if len(left) < 5 or len(right) < 2:
-                continue
-            entries.append(MountInfo(
-                mountpoint=decode_mountinfo_path(left[4]),
-                filesystem=right[0],
-                source=decode_mountinfo_path(right[1]),
-            ))
-    return entries
-
-
-def find_mount(path: Path, entries: Iterable[MountInfo] | None = None) -> MountInfo | None:
-    wanted = os.path.realpath(path)
-    for entry in entries or read_mountinfo():
-        if os.path.realpath(entry.mountpoint) == wanted:
-            return entry
-    return None
+def certify_cifs_transport(*args, **kwargs):
+    try:
+        return _certify_cifs_transport(*args, **kwargs)
+    except CifsTransportError as exc:
+        raise StorageError(str(exc)) from exc
 
 
 def _run(command: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
@@ -78,25 +56,37 @@ def verify_block_identity(target: TargetConfig) -> None:
         if separator:
             values[key] = value
     if values.get("UUID") != target.expected_uuid:
-        raise StorageError(f"device UUID mismatch for {target.name}: expected {target.expected_uuid}, got {values.get('UUID', '<none>')}")
-    if values.get("TYPE") != target.expected_filesystem:
-        raise StorageError(f"filesystem mismatch for {target.name}: expected {target.expected_filesystem}, got {values.get('TYPE', '<none>')}")
-
-
-def _cifs_mount_options(target: TargetConfig) -> tuple[str, ...]:
-    policy = target.effective_io_failure_policy
-    if policy not in {"soft", "hard"}:
-        raise StorageError(f"invalid CIFS I/O failure policy for {target.name}: {policy}")
-    conflicting = [
-        option
-        for option in target.mount_options
-        if option.partition("=")[0].strip().lower() in {"soft", "hard"}
-    ]
-    if conflicting:
         raise StorageError(
-            f"raw CIFS I/O failure options remain for {target.name}; use io_failure_policy instead"
+            f"device UUID mismatch for {target.name}: expected {target.expected_uuid}, "
+            f"got {values.get('UUID', '<none>')}"
         )
-    return (policy, *target.mount_options)
+    if values.get("TYPE") != target.expected_filesystem:
+        raise StorageError(
+            f"filesystem mismatch for {target.name}: expected {target.expected_filesystem}, "
+            f"got {values.get('TYPE', '<none>')}"
+        )
+
+
+def _mount_cifs(target: TargetConfig) -> None:
+    try:
+        profiles = _cifs_mount_profiles(target)
+    except CifsTransportError as exc:
+        raise StorageError(str(exc)) from exc
+    last_error: StorageError | None = None
+    for index, profile in enumerate(profiles):
+        options = [f"credentials={target.credentials_file}", *profile]
+        try:
+            _run(
+                ["mount", "-t", "cifs", target.source, str(target.mountpoint), "-o", ",".join(options)],
+                timeout=30,
+            )
+            return
+        except StorageError as exc:
+            last_error = exc
+            if index == len(profiles) - 1 or not is_capability_failure(exc):
+                raise
+    assert last_error is not None
+    raise last_error
 
 
 def mount_target(target: TargetConfig) -> None:
@@ -104,15 +94,12 @@ def mount_target(target: TargetConfig) -> None:
         if not target.mountpoint.exists():
             raise StorageError(f"path target does not exist: {target.mountpoint}")
         return
-
-    existing = find_mount(target.mountpoint)
-    if existing:
+    if find_mount(target.mountpoint):
         return
 
     prepare_barrier(target)
     if target.type == "cifs":
-        options = [f"credentials={target.credentials_file}", *_cifs_mount_options(target)]
-        _run(["mount", "-t", "cifs", target.source, str(target.mountpoint), "-o", ",".join(options)], timeout=30)
+        _mount_cifs(target)
     elif target.type == "block":
         verify_block_identity(target)
         command = ["mount", "-t", target.expected_filesystem]
@@ -130,7 +117,13 @@ def unmount_target(target: TargetConfig) -> None:
     if find_mount(target.mountpoint) is None:
         prepare_barrier(target)
         return
-    result = subprocess.run(["umount", "-l", str(target.mountpoint)], text=True, capture_output=True, timeout=15, check=False)
+    result = subprocess.run(
+        ["umount", "-l", str(target.mountpoint)],
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
     if result.returncode != 0:
         raise StorageError(result.stderr.strip() or f"failed to unmount {target.mountpoint}")
     prepare_barrier(target)
@@ -149,7 +142,9 @@ def _verify_mount_identity(target: TargetConfig) -> None:
         if mount.source.rstrip("/") != expected:
             raise StorageError(f"{target.name} source mismatch: expected {expected}, got {mount.source}")
     elif target.type == "block" and mount.filesystem != target.expected_filesystem:
-        raise StorageError(f"{target.name} filesystem mismatch: expected {target.expected_filesystem}, got {mount.filesystem}")
+        raise StorageError(
+            f"{target.name} filesystem mismatch: expected {target.expected_filesystem}, got {mount.filesystem}"
+        )
 
 
 def _sentinel_path(target: TargetConfig) -> Path:
@@ -158,6 +153,8 @@ def _sentinel_path(target: TargetConfig) -> Path:
 
 def verify_or_initialize_sentinel(target: TargetConfig, uid: int, gid: int) -> None:
     _verify_mount_identity(target)
+    if target.type == "cifs":
+        certify_cifs_transport(target)
     if not target.storage_root.exists():
         if not target.allow_initialize:
             raise StorageError(
@@ -173,7 +170,8 @@ def verify_or_initialize_sentinel(target: TargetConfig, uid: int, gid: int) -> N
             raise StorageError(f"invalid sentinel on {target.name}: {exc}") from exc
         if payload.get("sentinel_id") != target.sentinel_id:
             raise StorageError(
-                f"sentinel mismatch for {target.name}: expected {target.sentinel_id}, got {payload.get('sentinel_id', '<none>')}"
+                f"sentinel mismatch for {target.name}: expected {target.sentinel_id}, "
+                f"got {payload.get('sentinel_id', '<none>')}"
             )
     elif target.allow_initialize:
         payload = {"sentinel_id": target.sentinel_id, "target": target.name, "version": 1}
@@ -185,15 +183,7 @@ def verify_or_initialize_sentinel(target: TargetConfig, uid: int, gid: int) -> N
         finally:
             os.close(fd)
         temporary.replace(sentinel)
-        directory_fd = os.open(target.storage_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            try:
-                os.fsync(directory_fd)
-            except OSError as exc:
-                if exc.errno not in {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}:
-                    raise
-        finally:
-            os.close(directory_fd)
+        fsync_directory(target.storage_root)
     else:
         raise StorageError(
             f"sentinel missing for {target.name}; set allow_initialize=true only for the first intentional enrollment"
@@ -235,38 +225,17 @@ def probe_target(target: TargetConfig, full: bool = False) -> dict[str, int | st
     if free_bytes < target.min_free_bytes:
         raise StorageError(f"{target.name} free space below floor: {free_bytes} < {target.min_free_bytes}")
 
-    if full:
-        fd, filename = tempfile.mkstemp(prefix=".s3-storage-node-probe-", dir=target.storage_root)
-        data = os.urandom(4096)
-        try:
-            with os.fdopen(fd, "wb", closefd=True) as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            with open(filename, "rb") as handle:
-                if handle.read() != data:
-                    raise StorageError(f"read-back mismatch on {target.name}")
-            os.unlink(filename)
-            directory_fd = os.open(target.storage_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            try:
-                try:
-                    os.fsync(directory_fd)
-                except OSError as exc:
-                    if exc.errno not in {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}:
-                        raise
-            finally:
-                os.close(directory_fd)
-        finally:
-            try:
-                os.unlink(filename)
-            except FileNotFoundError:
-                pass
-
     result: dict[str, int | str] = {
         "free_bytes": free_bytes,
         "total_bytes": total_bytes,
         "path": str(target.storage_root),
     }
     if target.type == "cifs":
-        result["configured_io_failure_policy"] = target.effective_io_failure_policy
+        result.update(certify_cifs_transport(target))
+    if full:
+        try:
+            result.update(_append_durability_probe(target.storage_root))
+            temporary_durability_probe(target.storage_root)
+        except OSError as exc:
+            raise StorageError(str(exc)) from exc
     return result

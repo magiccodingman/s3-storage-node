@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+
 @dataclass(frozen=True)
 class TargetConfig:
     name: str
@@ -17,6 +18,11 @@ class TargetConfig:
     credentials_file: str = ""
     mount_options: tuple[str, ...] = ()
     io_failure_policy: str = ""
+    minimum_smb_dialect: str = ""
+    handle_reconnect_policy: str = "disabled"
+    multichannel_policy: str = "disabled"
+    max_channels: int = 2
+    require_transport_observability: bool = False
     device: str = ""
     expected_uuid: str = ""
     expected_filesystem: str = ""
@@ -46,6 +52,9 @@ class ApplianceConfig:
     shutdown_grace_seconds: int = 20
     recovery_initial_seconds: int = 5
     recovery_max_seconds: int = 60
+    recovery_stability_seconds: int = 15
+    recovery_probe_interval_seconds: int = 2
+    recovery_successes_required: int = 3
     s3_canary_enabled: bool = True
 
 

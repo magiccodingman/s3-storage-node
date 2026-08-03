@@ -44,6 +44,7 @@ class Guardian:
                 self.health.set("VERIFYING_STORAGE", False, "performing storage durability probe")
                 self._probe_targets(full=True)
                 self._start_seaweed()
+                self._stabilize_recovery()
                 self.health.set("ONLINE", True, "all storage and SeaweedFS checks passed")
                 event("info", "appliance_online")
                 delay = self.config.appliance.recovery_initial_seconds
@@ -168,9 +169,15 @@ class Guardian:
         )
 
     def _probe_targets(self, full: bool) -> None:
-        for target in self.config.active_targets:
-            result = self._run_probe(target.name, full)
-            self.health.set_storage(target.name, result)
+        started = time.monotonic()
+        try:
+            for target in self.config.active_targets:
+                result = self._run_probe(target.name, full)
+                self.health.set_storage(target.name, result)
+        except Exception as exc:
+            self.health.record_probe(False, time.monotonic() - started, str(exc))
+            raise
+        self.health.record_probe(True, time.monotonic() - started)
 
     def _build_processes(self) -> list[ManagedProcess]:
         config = self.config
@@ -273,6 +280,26 @@ class Guardian:
         if self.config.appliance.s3_canary_enabled:
             self._run_s3_canary()
 
+    def _stabilize_recovery(self) -> None:
+        stability_seconds = getattr(self.config.appliance, "recovery_stability_seconds", 15)
+        probe_interval = getattr(self.config.appliance, "recovery_probe_interval_seconds", 2)
+        required_successes = getattr(self.config.appliance, "recovery_successes_required", 3)
+        stable_since_monotonic = time.monotonic()
+        self.health.set_recovery_stable_since(time.time())
+        self.health.set("VERIFYING_RECOVERY", False, "waiting for sustained storage and S3 health")
+        successes = 0
+        while not self.stopping:
+            self._probe_targets(full=True)
+            if self.config.appliance.s3_canary_enabled:
+                self._run_s3_canary()
+            successes += 1
+            elapsed = time.monotonic() - stable_since_monotonic
+            if successes >= required_successes and elapsed >= stability_seconds:
+                event("info", "recovery_stable", seconds=elapsed, consecutive_successes=successes)
+                return
+            self._interruptible_sleep(probe_interval)
+        raise KeyboardInterrupt
+
     def _stop_seaweed(self) -> None:
         self.health.set("DRAINING", False, "stopping SeaweedFS")
         for process in reversed(self.processes):
@@ -287,17 +314,22 @@ class Guardian:
     def _online_loop(self) -> None:
         next_full = time.monotonic() + self.config.appliance.full_probe_interval_seconds
         while not self.stopping:
-            if self.haproxy and not self.haproxy.running():
-                raise ProcessError(f"HAProxy exited with code {self.haproxy.exit_code()}")
-            for process in self.processes:
-                if not process.running():
-                    raise ProcessError(f"{process.name} exited with code {process.exit_code()}")
-            full = time.monotonic() >= next_full
-            self._probe_targets(full=full)
-            if full:
-                if self.config.appliance.s3_canary_enabled:
-                    self._run_s3_canary()
-                next_full = time.monotonic() + self.config.appliance.full_probe_interval_seconds
+            try:
+                if self.haproxy and not self.haproxy.running():
+                    raise ProcessError(f"HAProxy exited with code {self.haproxy.exit_code()}")
+                for process in self.processes:
+                    if not process.running():
+                        raise ProcessError(f"{process.name} exited with code {process.exit_code()}")
+                full = time.monotonic() >= next_full
+                self._probe_targets(full=full)
+                if full:
+                    if self.config.appliance.s3_canary_enabled:
+                        self._run_s3_canary()
+                    next_full = time.monotonic() + self.config.appliance.full_probe_interval_seconds
+            except Exception as exc:
+                self.health.set("SUSPECT", False, str(exc))
+                event("warning", "appliance_suspect", error=str(exc), error_type=type(exc).__name__)
+                raise
             self._interruptible_sleep(self.config.appliance.probe_interval_seconds)
 
     def _repair_targets(self, unmount_all: bool = False) -> None:
