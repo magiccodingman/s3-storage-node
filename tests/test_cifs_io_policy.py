@@ -82,6 +82,7 @@ def test_mount_command_always_contains_one_explicit_policy(tmp_path: Path, monke
         io_failure_policy="hard",
     )
     commands: list[list[str]] = []
+    monkeypatch.setattr("s3_storage_node.storage.prepare_barrier", lambda _target: None)
     monkeypatch.setattr(
         "s3_storage_node.storage._run",
         lambda command, timeout=20: commands.append(command) or SimpleNamespace(returncode=0),
@@ -92,7 +93,7 @@ def test_mount_command_always_contains_one_explicit_policy(tmp_path: Path, monke
     assert "soft" not in options
 
 
-def test_raw_policy_in_target_is_defensively_rejected(tmp_path: Path) -> None:
+def test_raw_policy_in_target_is_defensively_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     target = TargetConfig(
         name="data",
         type="cifs",
@@ -104,6 +105,7 @@ def test_raw_policy_in_target_is_defensively_rejected(tmp_path: Path) -> None:
         mount_options=("soft",),
         io_failure_policy="soft",
     )
+    monkeypatch.setattr("s3_storage_node.storage.prepare_barrier", lambda _target: None)
     with pytest.raises(StorageError, match="use io_failure_policy"):
         mount_target(target)
 
