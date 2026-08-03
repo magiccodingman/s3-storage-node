@@ -27,10 +27,16 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install --upgrade pip pytest
+      - name: Install namespace networking tools
+        run: sudo apt-get update && sudo apt-get install -y iproute2 iptables
       - name: Verify real mount barriers fail closed
         env:
           RUN_PRIVILEGED_TESTS: "1"
         run: sudo --preserve-env=RUN_PRIVILEGED_TESTS env PYTHONPATH="$GITHUB_WORKSPACE/src" "$pythonLocation/bin/python" -m pytest -q tests/test_linux_fault_injection.py
+      - name: Verify generation namespaces and physical network fencing
+        env:
+          RUN_NAMESPACE_TESTS: "1"
+        run: sudo --preserve-env=RUN_NAMESPACE_TESTS env PYTHONPATH="$GITHUB_WORKSPACE/src" "$pythonLocation/bin/python" -m pytest -q tests/test_generation_namespace_integration.py
 
   docker:
     runs-on: ubuntu-latest
@@ -41,7 +47,17 @@ jobs:
         with:
           context: .
           push: false
+          load: true
           platforms: linux/amd64
           tags: s3-storage-node:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Verify namespace tooling under Docker security policy
+        run: |
+          docker run --rm \
+            --cap-add SYS_ADMIN \
+            --cap-add NET_ADMIN \
+            --security-opt apparmor=unconfined \
+            --entrypoint /bin/sh \
+            s3-storage-node:ci \
+            -c 'unshare --mount --net -- true && ip link add s3-ci-a type veth peer name s3-ci-b && ip link del s3-ci-a'

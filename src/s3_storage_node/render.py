@@ -23,8 +23,6 @@ def write_atomic(path: Path, content: str, mode: int = 0o600) -> None:
 
 
 def _toml_string(value: str) -> str:
-    # TOML basic strings use JSON-compatible escaping for the characters that
-    # can appear in these connection fields.
     return json.dumps(value)
 
 
@@ -106,6 +104,10 @@ def render_haproxy(config: Config) -> Path:
     tls = ""
     if config.s3.tls_mode == "terminate":
         tls = f" ssl crt {config.s3.tls_pem_file}"
+    backend_host = config.worker_endpoint_host
+    health_host = config.appliance.health_host
+    if health_host in {"0.0.0.0", "::", "[::]"}:
+        health_host = "127.0.0.1"
     content = f'''global
   log stdout format raw local0
   maxconn 4096
@@ -125,7 +127,7 @@ frontend s3_public
 backend seaweed_s3
   option httpchk GET /ready
   http-check expect status 200
-  server local_s3 127.0.0.1:{config.seaweed.s3_internal_port} check port {config.appliance.health_port} inter 2s fall 1 rise 2
+  server worker_s3 {backend_host}:{config.seaweed.s3_internal_port} check addr {health_host} port {config.appliance.health_port} inter 2s fall 1 rise 2
 '''
     path = config.appliance.runtime_dir / "generated" / "haproxy.cfg"
     write_atomic(path, content, 0o644)

@@ -42,6 +42,7 @@ def _authorization(method: str, path: str, host: str, payload: bytes, access_key
 
 
 def _request(
+    host: str,
     port: int,
     method: str,
     path: str,
@@ -53,7 +54,7 @@ def _request(
     headers = {"Host": signature_host, "Content-Length": str(len(body))}
     if access_key and secret_key:
         headers.update(_authorization(method, path, signature_host, body, access_key, secret_key))
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    connection = http.client.HTTPConnection(host, port, timeout=10)
     try:
         connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
@@ -63,6 +64,7 @@ def _request(
 
 
 def _run_canary_once(
+    host: str,
     port: int,
     access_key: str | None,
     secret_key: str | None,
@@ -72,16 +74,16 @@ def _run_canary_once(
     key = "canary"
     data = b"s3-storage-node-canary-v1"
 
-    status, body = _request(port, "PUT", f"/{bucket}", b"", access_key, secret_key, signature_host)
+    status, body = _request(host, port, "PUT", f"/{bucket}", b"", access_key, secret_key, signature_host)
     if status not in {200, 204, 409}:
         raise S3CheckError(f"bucket canary failed with HTTP {status}: {body[:200]!r}")
-    status, body = _request(port, "PUT", f"/{bucket}/{key}", data, access_key, secret_key, signature_host)
+    status, body = _request(host, port, "PUT", f"/{bucket}/{key}", data, access_key, secret_key, signature_host)
     if status not in {200, 201, 204}:
         raise S3CheckError(f"PUT canary failed with HTTP {status}: {body[:200]!r}")
-    status, body = _request(port, "GET", f"/{bucket}/{key}", b"", access_key, secret_key, signature_host)
+    status, body = _request(host, port, "GET", f"/{bucket}/{key}", b"", access_key, secret_key, signature_host)
     if status != 200 or body != data:
         raise S3CheckError(f"GET canary failed with HTTP {status} or content mismatch")
-    status, body = _request(port, "DELETE", f"/{bucket}/{key}", b"", access_key, secret_key, signature_host)
+    status, body = _request(host, port, "DELETE", f"/{bucket}/{key}", b"", access_key, secret_key, signature_host)
     if status not in {200, 204}:
         raise S3CheckError(f"DELETE canary failed with HTTP {status}: {body[:200]!r}")
 
@@ -91,11 +93,12 @@ def run_canary(
     access_key: str | None,
     secret_key: str | None,
     *,
+    host: str = "127.0.0.1",
     external_url: str = "",
     retry_seconds: float = 15.0,
     retry_interval_seconds: float = 1.0,
 ) -> None:
-    signature_host = f"127.0.0.1:{port}"
+    signature_host = f"{host}:{port}"
     if external_url:
         parsed = urlsplit(external_url)
         if not parsed.netloc:
@@ -106,7 +109,7 @@ def run_canary(
     last_error: S3CheckError | None = None
     while True:
         try:
-            _run_canary_once(port, access_key, secret_key, signature_host)
+            _run_canary_once(host, port, access_key, secret_key, signature_host)
             return
         except S3CheckError as exc:
             last_error = exc

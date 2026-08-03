@@ -11,11 +11,17 @@ startup_timeout_seconds = 30
 shutdown_grace_seconds = 20
 recovery_initial_seconds = 5
 recovery_max_seconds = 60
-# Keep a recovered node withdrawn until repeated full probes and the S3 canary
-# remain healthy across this window.
 recovery_stability_seconds = 15
 recovery_probe_interval_seconds = 2
 recovery_successes_required = 3
+
+# Run each SeaweedFS generation and its managed CIFS mount inside isolated
+# mount/network namespaces. Deleting the root veth fences a failed generation
+# before shutdown, so its CIFS session cannot reconnect behind the guardian.
+worker_fencing_mode = "namespace"
+worker_host_address = "169.254.254.1/30"
+worker_address = "169.254.254.2/30"
+worker_gateway = "169.254.254.1"
 s3_canary_enabled = true
 
 # The bulk SeaweedFS .dat volume storage.

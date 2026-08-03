@@ -23,6 +23,8 @@ class HealthState:
         self.last_failure_at = 0.0
         self.last_failure = ""
         self.recovery_stable_since = 0.0
+        self.writer: dict[str, Any] = {"scope": "local", "held": False}
+        self.generation: dict[str, Any] = {"id": 0, "mode": "disabled", "state": "none", "fenced": True}
 
     def set(self, state: str, ready: bool, reason: str = "") -> None:
         with self._lock:
@@ -51,6 +53,14 @@ class HealthState:
         with self._lock:
             self.recovery_stable_since = value
 
+    def set_writer(self, *, held: bool, scope: str = "local", owner: str = "") -> None:
+        with self._lock:
+            self.writer = {"scope": scope, "held": held, "owner": owner}
+
+    def set_generation(self, values: dict[str, Any]) -> None:
+        with self._lock:
+            self.generation = dict(values)
+
     def increment_failure(self) -> int:
         with self._lock:
             self.failures_total += 1
@@ -78,6 +88,8 @@ class HealthState:
                 "last_failure_at": self.last_failure_at,
                 "last_failure": self.last_failure,
                 "recovery_stable_since": self.recovery_stable_since,
+                "writer": self.writer,
+                "generation": self.generation,
             }
 
 
@@ -131,6 +143,12 @@ class Handler(BaseHTTPRequestHandler):
             f"s3_storage_node_consecutive_probe_successes {snapshot['consecutive_probe_successes']}",
             "# TYPE s3_storage_node_last_probe_duration_seconds gauge",
             f"s3_storage_node_last_probe_duration_seconds {snapshot['last_probe_duration_seconds']}",
+            "# TYPE s3_storage_node_writer_lease_held gauge",
+            f"s3_storage_node_writer_lease_held {1 if snapshot['writer'].get('held') else 0}",
+            "# TYPE s3_storage_node_generation gauge",
+            f"s3_storage_node_generation {snapshot['generation'].get('id', 0)}",
+            "# TYPE s3_storage_node_generation_fenced gauge",
+            f"s3_storage_node_generation_fenced {1 if snapshot['generation'].get('fenced') else 0}",
         ]
         for name, values in snapshot["storage"].items():
             target = self._label(name)
