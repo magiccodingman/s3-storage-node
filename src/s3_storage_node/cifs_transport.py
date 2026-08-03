@@ -161,9 +161,25 @@ def certify_cifs_transport(
 ) -> dict[str, int | str]:
     if target.type != "cifs":
         return {}
+    result: dict[str, int | str] = {
+        "configured_io_failure_policy": target.effective_io_failure_policy,
+        "configured_handle_reconnect_policy": target.handle_reconnect_policy,
+        "effective_handle_reconnect_mode": "disabled",
+        "configured_multichannel_policy": target.multichannel_policy,
+        "effective_multichannel": 0,
+        "transport_observed": 0,
+    }
     current = mount or find_mount(target.mountpoint)
     if current is None:
-        raise CifsTransportError(f"{target.name} is not mounted")
+        strict = bool(
+            target.minimum_smb_dialect
+            or target.handle_reconnect_policy in {"persistent", "resilient"}
+            or target.multichannel_policy == "required"
+            or target.require_transport_observability
+        )
+        if strict:
+            raise CifsTransportError(f"cannot certify required CIFS transport state for {target.name}")
+        return result
 
     options = current.mount_options | current.super_options
     names = {mount_option_name(option) for option in options}
@@ -171,14 +187,8 @@ def certify_cifs_transport(
     dialect = _normalize_dialect(vers) if vers else ""
     handle_mode = "persistent" if "persistenthandles" in names else "resilient" if "resilienthandles" in names else "disabled"
     multichannel_active = "multichannel" in names or "max_channels" in names
-    result: dict[str, int | str] = {
-        "configured_io_failure_policy": target.effective_io_failure_policy,
-        "configured_handle_reconnect_policy": target.handle_reconnect_policy,
-        "effective_handle_reconnect_mode": handle_mode,
-        "configured_multichannel_policy": target.multichannel_policy,
-        "effective_multichannel": 1 if multichannel_active else 0,
-        "transport_observed": 0,
-    }
+    result["effective_handle_reconnect_mode"] = handle_mode
+    result["effective_multichannel"] = 1 if multichannel_active else 0
 
     debug_text = _read_optional(debug_data_path)
     matched_share: dict[str, object] | None = None
