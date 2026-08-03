@@ -174,6 +174,15 @@ class Handler(BaseHTTPRequestHandler):
                 lines.append(
                     f's3_storage_node_cifs_transport_info{{target="{target}",dialect="{dialect}",handles="{handles}"}} 1'
                 )
+            if "active_transport" in values:
+                active = self._label(values["active_transport"])
+                primary = self._label(values.get("primary_transport", ""))
+                lines.append(
+                    f's3_storage_node_transport_info{{target="{target}",active="{active}",primary="{primary}"}} 1'
+                )
+                lines.append(
+                    f's3_storage_node_transport_using_primary{{target="{target}"}} {values.get("using_primary", 0)}'
+                )
         body = ("\n".join(lines) + "\n").encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; version=0.0.4")

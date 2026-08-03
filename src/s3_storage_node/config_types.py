@@ -27,6 +27,12 @@ class TargetConfig:
     device: str = ""
     expected_uuid: str = ""
     expected_filesystem: str = ""
+    transport_name: str = ""
+    ssh_identity_file: str = ""
+    ssh_known_hosts_file: str = ""
+    ssh_runtime_identity_file: str = ""
+    ssh_runtime_pid_file: str = ""
+    ssh_port: int = 22
 
     @property
     def storage_root(self) -> Path:

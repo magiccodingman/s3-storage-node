@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
 
 from .config import ConfigError, load_config
-from .generation_guardian import run_guardian
 from .storage import (
     StorageError,
     mount_target,
@@ -16,6 +16,13 @@ from .storage import (
     unmount_target,
     verify_or_initialize_sentinel,
 )
+from .transport_failover import (
+    TransportFailoverError,
+    TransportSelector,
+    load_exclusive_failover,
+    resolve_target,
+)
+from .transport_guardian import run_guardian
 
 
 def parser() -> argparse.ArgumentParser:
@@ -34,11 +41,19 @@ def parser() -> argparse.ArgumentParser:
         command = subcommands.add_parser(name, help=help_text)
         command.add_argument("--config", required=True)
         command.add_argument("--target", required=True)
+        command.add_argument("--transport", default="")
         if name == "probe":
             command.add_argument("--full", action="store_true")
 
     layout = subcommands.add_parser("prepare-layout", help="create guarded SeaweedFS role directories")
     layout.add_argument("--config", required=True)
+
+    status = subcommands.add_parser("transport-status", help="show exclusive failover transport state")
+    status.add_argument("--config", default="/etc/s3-storage-node/config.toml")
+
+    select = subcommands.add_parser("transport-select", help="request a controlled transport switch")
+    select.add_argument("--config", default="/etc/s3-storage-node/config.toml")
+    select.add_argument("--transport", required=True)
 
     validate = subcommands.add_parser("validate", help="validate configuration")
     validate.add_argument("--config", default="/etc/s3-storage-node/config.toml")
@@ -48,6 +63,14 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
+def _selector(config_path: str):
+    config = load_config(config_path)
+    failover = load_exclusive_failover(config_path, config)
+    if failover is None:
+        raise TransportFailoverError("storage.data.failover is not enabled")
+    return config, TransportSelector(config.appliance.state_dir / "guardian", failover)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     command = args.command or "run"
@@ -55,8 +78,9 @@ def main(argv: list[str] | None = None) -> int:
         return run_guardian(args.config)
     if command == "validate":
         try:
-            load_config(args.config)
-        except ConfigError as exc:
+            config = load_config(args.config)
+            load_exclusive_failover(args.config, config)
+        except (ConfigError, TransportFailoverError) as exc:
             print(str(exc), file=sys.stderr)
             return 2
         print("configuration valid")
@@ -72,6 +96,16 @@ def main(argv: list[str] | None = None) -> int:
                 return 0 if response.status == 200 else 1
         except (ConfigError, OSError, urllib.error.URLError):
             return 1
+    if command in {"transport-status", "transport-select"}:
+        try:
+            _config, selector = _selector(args.config)
+            if command == "transport-select":
+                selector.request(args.transport)
+            print(json.dumps(selector.status(), sort_keys=True))
+            return 0
+        except (ConfigError, TransportFailoverError, OSError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
 
     try:
         config = load_config(args.config)
@@ -83,23 +117,24 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"prepared": True, "paths": [str(path) for path in paths]}))
             return 0
 
-        target = config.targets[args.target]
+        selected_transport = args.transport or os.environ.get("S3_STORAGE_NODE_TRANSPORT", "")
+        target = resolve_target(args.config, config, args.target, selected_transport)
         if command == "mount":
             mount_target(target)
-            print(json.dumps({"mounted": True, "target": target.name}))
+            print(json.dumps({"mounted": True, "target": target.name, "transport": target.transport_name}))
             return 0
         if command == "unmount":
             unmount_target(target)
-            print(json.dumps({"unmounted": True, "target": target.name}))
+            print(json.dumps({"unmounted": True, "target": target.name, "transport": target.transport_name}))
             return 0
         if command == "prepare":
             verify_or_initialize_sentinel(target, config.appliance.uid, config.appliance.gid)
-            print(json.dumps({"prepared": True, "target": target.name}))
+            print(json.dumps({"prepared": True, "target": target.name, "transport": target.transport_name}))
             return 0
         if command == "probe":
             print(json.dumps(probe_target(target, full=args.full), sort_keys=True))
             return 0
-    except (ConfigError, StorageError, KeyError, OSError, ValueError) as exc:
+    except (ConfigError, TransportFailoverError, StorageError, KeyError, OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
     return 2

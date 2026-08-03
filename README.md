@@ -52,10 +52,11 @@ The container stays alive during a storage outage. Its PID 1 guardian owns the l
 | Storage type | Status | Appliance behavior |
 |---|---|---|
 | SMB/CIFS | Supported | Mounted and repaired inside the container |
+| CIFS with SSHFS recovery | Optional | Exclusively switches fenced worker generations to the same sentinel-protected dataset; never mounts both writers together |
 | Fixed block device | Supported | UUID and filesystem verified, then mounted; never formatted |
 | Existing host path | Supported | Verified and monitored; mounting remains the host's responsibility and enrollment is manual outside appliance state |
 
-Version 1 intentionally does not place rclone, SSHFS, or WebDAV beneath SeaweedFS volume files. Those layers can acknowledge writes differently from the underlying remote storage and require separate durability testing.
+SSHFS is supported only as an optional, exclusive recovery transport for a canonical CIFS data target. The appliance still does not place rclone, WebDAV, or a union filesystem beneath live SeaweedFS volume files.
 
 ## Requirements
 
@@ -63,10 +64,12 @@ Version 1 intentionally does not place rclone, SSHFS, or WebDAV beneath SeaweedF
 - Docker Engine with Compose v2
 - A kernel with CIFS support for SMB targets
 - `CAP_SYS_ADMIN` for appliance-managed mounts
+- `CAP_NET_ADMIN` for worker-generation network fencing
 - AppArmor allowance for mounting; the included Compose file uses `apparmor=unconfined`
+- `/dev/fuse` and the optional `docker-compose.sshfs.yml` overlay when SSHFS failover is enabled
 - For block devices, an already formatted filesystem and an explicit Docker device mapping
 
-The container uses Debian 13.6 slim and includes SeaweedFS, `mount.cifs`, HAProxy, filesystem tools, and the guardian. The image is published for `linux/amd64` and `linux/arm64`.
+The container uses Debian 13.6 slim and includes SeaweedFS, `mount.cifs`, SSHFS, HAProxy, filesystem tools, and the guardian. The image is published for `linux/amd64` and `linux/arm64`.
 
 ## Quick start: CIFS / SMB
 
@@ -298,13 +301,14 @@ When an active target fails:
 1. Readiness changes to `503`.
 2. HAProxy withdraws the SeaweedFS S3 backend.
 3. New S3 requests fail immediately rather than waiting on a dead filesystem.
-4. S3, filer, volume, and master processes stop in reverse order.
-5. Appliance-managed mounts are lazily detached.
-6. Recovery retries with exponential backoff.
-7. The target source, filesystem, sentinel, free space, and durable write/read/delete cycle are verified.
-8. SeaweedFS restarts in dependency order.
-9. An authenticated S3 PUT/GET/DELETE canary must pass.
-10. Readiness returns to `200` and HAProxy reopens traffic.
+4. The worker generation's network path is fenced before shutdown or mount repair.
+5. S3, filer, volume, and master processes stop in reverse order.
+6. Appliance-managed mounts are lazily detached.
+7. Recovery retries with exponential backoff; configured transport failures rotate to the next eligible exclusive transport.
+8. The target source, filesystem, sentinel, free space, and durable write/read/delete cycle are verified.
+9. SeaweedFS restarts in dependency order.
+10. An authenticated S3 PUT/GET/DELETE canary and the recovery stability window must pass.
+11. Readiness returns to `200` and HAProxy reopens traffic.
 
 Failed S3 operations are never reported as successful by this node. An upstream orchestrator should record a replica only after receiving a completed successful response.
 
@@ -333,9 +337,9 @@ Use Docker's logging driver or any stdout collector. Failure duration and extern
 
 ## Security note
 
-Mounting filesystems inside a container requires substantial privilege. The included Compose file grants `CAP_SYS_ADMIN` and relaxes AppArmor for this container. The image does not mount the Docker socket, host root filesystem, or host PID namespace. SeaweedFS itself runs as UID/GID `10001` without mount privileges; only the small guardian runs as root.
+Mounting filesystems inside a container requires substantial privilege. The included Compose file grants `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` and relaxes AppArmor for this container. The image does not mount the Docker socket, host root filesystem, or host PID namespace. SeaweedFS itself runs as UID/GID `10001` without mount privileges; only the small guardian runs as root.
 
-Review the Compose file before deploying and restrict access to configuration, credentials, block devices, and the health endpoint.
+Review the Compose file before deploying and restrict access to configuration, credentials, block devices, `/dev/fuse`, and the health endpoint.
 
 ## Documentation
 
@@ -343,6 +347,8 @@ Review the Compose file before deploying and restrict access to configuration, c
 - [Configuration reference](docs/configuration.md)
 - [Storage backends](docs/storage-backends.md)
 - [Operations and recovery](docs/operations.md)
+- [Worker-generation fencing](docs/worker-generation-fencing.md)
+- [Exclusive CIFS-to-SSHFS failover](docs/exclusive-transport-failover.md)
 - [Security model](docs/security.md)
 - [Release workflow](docs/releasing.md)
 

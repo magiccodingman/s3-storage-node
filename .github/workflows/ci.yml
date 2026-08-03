@@ -27,8 +27,8 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install --upgrade pip pytest
-      - name: Install namespace networking tools
-        run: sudo apt-get update && sudo apt-get install -y iproute2 iptables
+      - name: Install namespace and SSHFS integration tools
+        run: sudo apt-get update && sudo apt-get install -y iproute2 iptables openssh-server sshfs
       - name: Verify real mount barriers fail closed
         env:
           RUN_PRIVILEGED_TESTS: "1"
@@ -37,6 +37,10 @@ jobs:
         env:
           RUN_NAMESPACE_TESTS: "1"
         run: sudo --preserve-env=RUN_NAMESPACE_TESTS env PYTHONPATH="$GITHUB_WORKSPACE/src" "$pythonLocation/bin/python" -m pytest -q tests/test_generation_namespace_integration.py
+      - name: Verify a real SSHFS mount and durability probe
+        env:
+          RUN_SSHFS_INTEGRATION: "1"
+        run: sudo --preserve-env=RUN_SSHFS_INTEGRATION env PYTHONPATH="$GITHUB_WORKSPACE/src" "$pythonLocation/bin/python" -m pytest -q tests/test_sshfs_integration.py
 
   docker:
     runs-on: ubuntu-latest
@@ -61,3 +65,5 @@ jobs:
             --entrypoint /bin/sh \
             s3-storage-node:ci \
             -c 'unshare --mount --net -- true && ip link add s3-ci-a type veth peer name s3-ci-b && ip link del s3-ci-a'
+      - name: Verify SSHFS tooling is present
+        run: docker run --rm --entrypoint /usr/bin/sshfs s3-storage-node:ci --version

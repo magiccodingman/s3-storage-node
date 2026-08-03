@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -89,6 +91,98 @@ def _mount_cifs(target: TargetConfig) -> None:
     raise last_error
 
 
+def _sshfs_pid_path(target: TargetConfig) -> Path | None:
+    return Path(target.ssh_runtime_pid_file) if target.ssh_runtime_pid_file else None
+
+
+def _stop_sshfs_process(target: TargetConfig) -> None:
+    pid_path = _sshfs_pid_path(target)
+    if pid_path is None:
+        return
+    try:
+        pid = int(pid_path.read_text(encoding="ascii").strip())
+    except (FileNotFoundError, OSError, ValueError):
+        pid_path.unlink(missing_ok=True)
+        return
+    try:
+        command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except (FileNotFoundError, OSError):
+        pid_path.unlink(missing_ok=True)
+        return
+    executable = Path(command[0].decode(errors="replace")).name if command and command[0] else ""
+    arguments = {item.decode(errors="replace") for item in command[1:] if item}
+    if executable != "sshfs" or str(target.mountpoint) not in arguments:
+        pid_path.unlink(missing_ok=True)
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pid_path.unlink(missing_ok=True)
+        return
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and Path(f"/proc/{pid}").exists():
+        time.sleep(0.05)
+    if Path(f"/proc/{pid}").exists():
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    pid_path.unlink(missing_ok=True)
+
+
+def _mount_sshfs(target: TargetConfig) -> None:
+    if not target.ssh_identity_file or not target.ssh_known_hosts_file:
+        raise StorageError(f"SSHFS transport {target.transport_name or target.name} is missing identity configuration")
+    for path, label in (
+        (target.ssh_identity_file, "identity file"),
+        (target.ssh_known_hosts_file, "known-hosts file"),
+    ):
+        if not Path(path).is_file():
+            raise StorageError(f"SSHFS {label} does not exist: {path}")
+    runtime_identity = Path(target.ssh_runtime_identity_file or target.ssh_identity_file)
+    if runtime_identity != Path(target.ssh_identity_file):
+        runtime_identity.parent.mkdir(parents=True, exist_ok=True)
+        temporary = runtime_identity.with_suffix(runtime_identity.suffix + ".tmp")
+        temporary.write_bytes(Path(target.ssh_identity_file).read_bytes())
+        os.chmod(temporary, 0o600)
+        temporary.replace(runtime_identity)
+    command = ["sshfs", "-f", target.source, str(target.mountpoint)]
+    if target.mount_options:
+        command.extend(["-o", ",".join(target.mount_options)])
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 25
+    try:
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise StorageError(
+                    f"SSHFS transport {target.transport_name or target.name} exited with code {process.returncode}"
+                )
+            if find_mount(target.mountpoint) is not None:
+                pid_path = _sshfs_pid_path(target)
+                if pid_path is not None:
+                    pid_path.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = pid_path.with_suffix(pid_path.suffix + ".tmp")
+                    temporary.write_text(f"{process.pid}\n", encoding="ascii")
+                    os.chmod(temporary, 0o600)
+                    temporary.replace(pid_path)
+                return
+            time.sleep(0.1)
+        raise StorageError(f"timed out waiting for SSHFS transport {target.transport_name or target.name}")
+    except Exception:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        raise
+
+
 def mount_target(target: TargetConfig) -> None:
     if target.type == "path":
         if not target.mountpoint.exists():
@@ -100,6 +194,8 @@ def mount_target(target: TargetConfig) -> None:
     prepare_barrier(target)
     if target.type == "cifs":
         _mount_cifs(target)
+    elif target.type == "sshfs":
+        _mount_sshfs(target)
     elif target.type == "block":
         verify_block_identity(target)
         command = ["mount", "-t", target.expected_filesystem]
@@ -115,8 +211,22 @@ def unmount_target(target: TargetConfig) -> None:
     if target.type == "path":
         return
     if find_mount(target.mountpoint) is None:
+        if target.type == "sshfs":
+            _stop_sshfs_process(target)
         prepare_barrier(target)
         return
+    if target.type == "sshfs":
+        result = subprocess.run(
+            ["fusermount3", "-u", "-z", str(target.mountpoint)],
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        if result.returncode == 0:
+            _stop_sshfs_process(target)
+            prepare_barrier(target)
+            return
     result = subprocess.run(
         ["umount", "-l", str(target.mountpoint)],
         text=True,
@@ -126,6 +236,8 @@ def unmount_target(target: TargetConfig) -> None:
     )
     if result.returncode != 0:
         raise StorageError(result.stderr.strip() or f"failed to unmount {target.mountpoint}")
+    if target.type == "sshfs":
+        _stop_sshfs_process(target)
     prepare_barrier(target)
 
 
@@ -141,6 +253,11 @@ def _verify_mount_identity(target: TargetConfig) -> None:
         expected = target.source.rstrip("/")
         if mount.source.rstrip("/") != expected:
             raise StorageError(f"{target.name} source mismatch: expected {expected}, got {mount.source}")
+    elif target.type == "sshfs":
+        if mount.filesystem not in {"fuse.sshfs", "fuse"}:
+            raise StorageError(f"{target.name} mounted with unexpected filesystem {mount.filesystem}")
+        if mount.source.rstrip("/") != target.source.rstrip("/"):
+            raise StorageError(f"{target.name} source mismatch: expected {target.source}, got {mount.source}")
     elif target.type == "block" and mount.filesystem != target.expected_filesystem:
         raise StorageError(
             f"{target.name} filesystem mismatch: expected {target.expected_filesystem}, got {mount.filesystem}"
@@ -229,9 +346,18 @@ def probe_target(target: TargetConfig, full: bool = False) -> dict[str, int | st
         "free_bytes": free_bytes,
         "total_bytes": total_bytes,
         "path": str(target.storage_root),
+        "transport_type": target.type,
+        "transport_name": target.transport_name or target.type,
+        "failure_domains": 1,
+        "durability_class": "transport_acknowledged",
     }
     if target.type == "cifs":
         result.update(certify_cifs_transport(target))
+    elif target.type == "sshfs":
+        result.update({
+            "sshfs_sync": 1 if "sshfs_sync" in target.mount_options else 0,
+            "transport_observed": 1,
+        })
     if full:
         try:
             result.update(_append_durability_probe(target.storage_root))
