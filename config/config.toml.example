@@ -27,6 +27,15 @@ min_free_bytes = 10737418240
 # relies on an invisible kernel default. Hard mode can leave I/O blocked until
 # the server returns and should be enabled only after failure testing.
 io_failure_policy = "soft"
+# Try the strongest handle reconnect mode the server accepts, while preserving a
+# safe fallback for providers that do not implement persistent/resilient handles.
+handle_reconnect_policy = "auto"
+# Enforce the negotiated protocol floor even if a server silently downgrades.
+minimum_smb_dialect = "3.1.1"
+# Multichannel is opt-in here because many hosted SMB services expose one path.
+# Set to "auto" with max_channels = 2 after validating the provider/network.
+multichannel_policy = "disabled"
+require_transport_observability = false
 mount_options = [
   "vers=3.1.1",
   "uid=10001",
