@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 
 from .config import ConfigError, load_config
+from .lease_guardian import run_guardian
 from .storage import (
     StorageError,
     mount_target,
@@ -22,7 +23,7 @@ from .transport_failover import (
     load_exclusive_failover,
     resolve_target,
 )
-from .transport_guardian import run_guardian
+from .writer_lease import WriterLeaseController, WriterLeaseError, load_writer_lease
 
 
 def parser() -> argparse.ArgumentParser:
@@ -55,6 +56,16 @@ def parser() -> argparse.ArgumentParser:
     select.add_argument("--config", default="/etc/s3-storage-node/config.toml")
     select.add_argument("--transport", required=True)
 
+    lease_status = subcommands.add_parser("writer-lease-status", help="show configured writer lease state")
+    lease_status.add_argument("--config", default="/etc/s3-storage-node/config.toml")
+
+    lease_unblock = subcommands.add_parser(
+        "writer-lease-unblock",
+        help="clear an expired takeover block for one exact fencing token",
+    )
+    lease_unblock.add_argument("--config", default="/etc/s3-storage-node/config.toml")
+    lease_unblock.add_argument("--expected-token", type=int, required=True)
+
     validate = subcommands.add_parser("validate", help="validate configuration")
     validate.add_argument("--config", default="/etc/s3-storage-node/config.toml")
 
@@ -71,6 +82,12 @@ def _selector(config_path: str):
     return config, TransportSelector(config.appliance.state_dir / "guardian", failover)
 
 
+def _writer_lease(config_path: str):
+    config = load_config(config_path)
+    lease_config = load_writer_lease(config_path, config)
+    return WriterLeaseController(lease_config)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     command = args.command or "run"
@@ -80,7 +97,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             config = load_config(args.config)
             load_exclusive_failover(args.config, config)
-        except (ConfigError, TransportFailoverError) as exc:
+            load_writer_lease(args.config, config)
+        except (ConfigError, TransportFailoverError, WriterLeaseError) as exc:
             print(str(exc), file=sys.stderr)
             return 2
         print("configuration valid")
@@ -106,6 +124,24 @@ def main(argv: list[str] | None = None) -> int:
         except (ConfigError, TransportFailoverError, OSError, ValueError) as exc:
             print(str(exc), file=sys.stderr)
             return 1
+    if command in {"writer-lease-status", "writer-lease-unblock"}:
+        controller: WriterLeaseController | None = None
+        try:
+            controller = _writer_lease(args.config)
+            if command == "writer-lease-unblock":
+                if args.expected_token <= 0:
+                    raise WriterLeaseError("--expected-token must be greater than zero")
+                changed = controller.unblock(args.expected_token)
+                print(json.dumps({"unblocked": changed, "expected_token": args.expected_token}, sort_keys=True))
+                return 0 if changed else 1
+            print(json.dumps(controller.status(), sort_keys=True))
+            return 0
+        except (ConfigError, WriterLeaseError, OSError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        finally:
+            if controller is not None:
+                controller.close(release=False)
 
     try:
         config = load_config(args.config)
