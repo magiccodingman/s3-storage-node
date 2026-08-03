@@ -16,6 +16,7 @@ class TargetConfig:
     source: str = ""
     credentials_file: str = ""
     mount_options: tuple[str, ...] = ()
+    io_failure_policy: str = ""
     device: str = ""
     expected_uuid: str = ""
     expected_filesystem: str = ""
@@ -23,6 +24,10 @@ class TargetConfig:
     @property
     def storage_root(self) -> Path:
         return self.mountpoint / self.subdirectory if self.subdirectory else self.mountpoint
+
+    @property
+    def effective_io_failure_policy(self) -> str:
+        return self.io_failure_policy or "soft"
 
 
 @dataclass(frozen=True)
@@ -141,5 +146,3 @@ class Config:
     @property
     def index_path(self) -> Path:
         return self.targets[self.index.target].storage_root / self.index.directory
-
-
