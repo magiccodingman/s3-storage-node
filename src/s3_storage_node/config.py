@@ -78,7 +78,7 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         "recovery_probe_interval_seconds", "recovery_successes_required",
     ):
         _positive(getattr(appliance, field_name), f"appliance.{field_name}")
-    _positive(appliance.recovery_stability_seconds, "appliance.recovery_stability_seconds", allow_zero=True)
+    _positive(appliance.recovery_stability_seconds, "appliance.recovery_stability_seconds")
     if appliance.recovery_initial_seconds > appliance.recovery_max_seconds:
         raise ConfigError("appliance.recovery_initial_seconds may not exceed recovery_max_seconds")
 

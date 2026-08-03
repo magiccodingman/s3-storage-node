@@ -21,7 +21,7 @@ worker_fencing_mode = "{mode}"
 worker_host_address = "169.254.254.1/30"
 worker_address = "{worker}"
 worker_gateway = "169.254.254.1"
-recovery_stability_seconds = 0
+recovery_stability_seconds = 1
 
 [storage.data]
 {data}
