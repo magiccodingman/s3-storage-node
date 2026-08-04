@@ -8,6 +8,7 @@ services:
     restart: unless-stopped
     cap_add:
       - SYS_ADMIN
+      - NET_ADMIN
       - DAC_READ_SEARCH
     security_opt:
       - apparmor=unconfined

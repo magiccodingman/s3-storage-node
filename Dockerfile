@@ -15,11 +15,17 @@ RUN apt-get update \
        ca-certificates \
        cifs-utils \
        e2fsprogs \
+       fuse3 \
        haproxy \
+       iproute2 \
+       iptables \
+       openssh-client \
        python3 \
+       sshfs \
        tini \
        util-linux \
        xfsprogs \
+    && printf 'user_allow_other\n' > /etc/fuse.conf \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 seaweed \
     && useradd --uid 10001 --gid 10001 --home-dir /var/lib/s3-storage-node --no-create-home --shell /usr/sbin/nologin seaweed \

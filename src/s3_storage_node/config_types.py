@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ipaddress
 from pathlib import Path
+
 
 @dataclass(frozen=True)
 class TargetConfig:
@@ -16,13 +18,29 @@ class TargetConfig:
     source: str = ""
     credentials_file: str = ""
     mount_options: tuple[str, ...] = ()
+    io_failure_policy: str = ""
+    minimum_smb_dialect: str = ""
+    handle_reconnect_policy: str = "disabled"
+    multichannel_policy: str = "disabled"
+    max_channels: int = 2
+    require_transport_observability: bool = False
     device: str = ""
     expected_uuid: str = ""
     expected_filesystem: str = ""
+    transport_name: str = ""
+    ssh_identity_file: str = ""
+    ssh_known_hosts_file: str = ""
+    ssh_runtime_identity_file: str = ""
+    ssh_runtime_pid_file: str = ""
+    ssh_port: int = 22
 
     @property
     def storage_root(self) -> Path:
         return self.mountpoint / self.subdirectory if self.subdirectory else self.mountpoint
+
+    @property
+    def effective_io_failure_policy(self) -> str:
+        return self.io_failure_policy or "soft"
 
 
 @dataclass(frozen=True)
@@ -41,7 +59,14 @@ class ApplianceConfig:
     shutdown_grace_seconds: int = 20
     recovery_initial_seconds: int = 5
     recovery_max_seconds: int = 60
+    recovery_stability_seconds: int = 15
+    recovery_probe_interval_seconds: int = 2
+    recovery_successes_required: int = 3
     s3_canary_enabled: bool = True
+    worker_fencing_mode: str = "disabled"
+    worker_host_address: str = "169.254.254.1/30"
+    worker_address: str = "169.254.254.2/30"
+    worker_gateway: str = "169.254.254.1"
 
 
 @dataclass(frozen=True)
@@ -142,4 +167,8 @@ class Config:
     def index_path(self) -> Path:
         return self.targets[self.index.target].storage_root / self.index.directory
 
-
+    @property
+    def worker_endpoint_host(self) -> str:
+        if self.appliance.worker_fencing_mode != "namespace":
+            return "127.0.0.1"
+        return str(ipaddress.ip_interface(self.appliance.worker_address).ip)

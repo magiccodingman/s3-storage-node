@@ -11,9 +11,19 @@ startup_timeout_seconds = 30
 shutdown_grace_seconds = 20
 recovery_initial_seconds = 5
 recovery_max_seconds = 60
+recovery_stability_seconds = 15
+recovery_probe_interval_seconds = 2
+recovery_successes_required = 3
+
+# Run each SeaweedFS generation and its managed storage mount inside isolated
+# mount/network namespaces. Exclusive transport failover requires this mode.
+worker_fencing_mode = "namespace"
+worker_host_address = "169.254.254.1/30"
+worker_address = "169.254.254.2/30"
+worker_gateway = "169.254.254.1"
 s3_canary_enabled = true
 
-# The bulk SeaweedFS .dat volume storage.
+# The canonical/preferred bulk SeaweedFS .dat transport.
 [storage.data]
 type = "cifs"
 source = "//u123456.your-storagebox.de/backup"
@@ -23,6 +33,11 @@ credentials_file = "/run/secrets/cifs_credentials"
 sentinel_id = "replace-with-a-stable-unique-id"
 allow_initialize = false
 min_free_bytes = 10737418240
+io_failure_policy = "soft"
+handle_reconnect_policy = "auto"
+minimum_smb_dialect = "3.1.1"
+multichannel_policy = "disabled"
+require_transport_observability = false
 mount_options = [
   "vers=3.1.1",
   "uid=10001",
@@ -37,6 +52,27 @@ mount_options = [
   "echo_interval=15",
   "actimeo=1"
 ]
+
+# Optional exclusive fallback to the same dataset through SFTP/SSHFS. The
+# fallback is sticky: the guardian does not automatically fail back to CIFS.
+# Run Compose with docker-compose.sshfs.yml so /dev/fuse and these secrets are
+# available before enabling this table.
+[storage.data.failover]
+enabled = false
+primary_name = "cifs-primary"
+primary_priority = 10
+failback_policy = "manual"
+failure_cooldown_seconds = 60
+
+[[storage.data.failover.transports]]
+name = "sshfs-secondary"
+type = "sshfs"
+priority = 20
+source = "u123456@u123456.your-storagebox.de:/home"
+identity_file = "/run/secrets/ssh_identity"
+known_hosts_file = "/run/secrets/ssh_known_hosts"
+port = 23
+mount_options = []
 
 # Local persistent filer metadata. This can instead be another cifs/block/path target.
 [storage.metadata]
@@ -77,8 +113,6 @@ default_replication = "000"
 filer_max_mb = 16
 data_center = ""
 rack = ""
-# Leave empty for the normal/default disk tier. Set a custom value only when
-# clients and placement policies explicitly target that SeaweedFS disk type.
 disk_type = ""
 encrypt_volume_data = false
 master_extra_args = []
