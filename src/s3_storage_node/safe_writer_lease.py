@@ -10,6 +10,7 @@ from .writer_lease import (
     WriterLeaseController,
     WriterLeaseError,
     WriterLeaseLost,
+    WriterLeaseUnavailable,
     load_writer_lease as _load_writer_lease,
 )
 
@@ -127,8 +128,6 @@ class SafeWriterLeaseController(WriterLeaseController):
                 detail = f"held by {current.owner_id} with token {current.fencing_token}"
                 if current.takeover_blocked:
                     detail += f"; takeover blocked: {current.block_reason or 'no reason recorded'}"
-            from .writer_lease import WriterLeaseUnavailable
-
             raise WriterLeaseUnavailable(
                 f"writer lease {self.config.lease_name!r} unavailable: {detail}"
             )
@@ -145,6 +144,7 @@ class SafeWriterLeaseController(WriterLeaseController):
                     return
                 token = self._fencing_token
                 deadline = self._deadline_monotonic
+                was_at_risk = self._at_risk
             assert self.backend is not None
             safe_deadline = deadline - self.config.fence_margin_seconds
             operation_room = safe_deadline - time.monotonic()
@@ -179,6 +179,9 @@ class SafeWriterLeaseController(WriterLeaseController):
                 # guardian-side deadline.
                 self._mark_lost(str(exc))
                 return
+            except WriterLeaseLost as exc:
+                self._mark_lost(str(exc))
+                return
             except Exception as exc:  # noqa: BLE001 - renewal boundary
                 message = str(exc)
                 first_risk = False
@@ -204,15 +207,13 @@ class SafeWriterLeaseController(WriterLeaseController):
                 )
                 continue
 
-            recovered = False
             with self._lock:
-                recovered = self._at_risk
                 self._at_risk = False
                 self._lost = False
                 self._renewals_total += 1
                 self._last_error = ""
             self._publish()
-            if recovered and self.on_recovered is not None:
+            if was_at_risk and self.on_recovered is not None:
                 self.on_recovered()
             delay = float(self.config.renew_interval_seconds)
 
