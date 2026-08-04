@@ -56,7 +56,16 @@ jobs:
       - name: Exercise real CIFS-to-SSHFS failover and guardian restart
         env:
           RUN_TRANSPORT_CHAOS: "1"
+          TRANSPORT_CHAOS_DIAGNOSTIC_FILE: ${{ github.workspace }}/transport-chaos-diagnostics.txt
         run: PYTHONPATH=src python -m pytest -q -s tests/test_transport_chaos_integration.py
+      - name: Upload concise chaos diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: transport-chaos-diagnostics
+          path: transport-chaos-diagnostics.txt
+          if-no-files-found: warn
+          retention-days: 3
 
   docker:
     runs-on: ubuntu-latest
