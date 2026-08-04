@@ -1,0 +1,70 @@
+services:
+  samba:
+    build:
+      context: ../..
+      dockerfile: tests/chaos/Dockerfile.samba
+    cap_add:
+      - NET_ADMIN
+    environment:
+      SAMBA_PASSWORD: chaos-password
+    networks:
+      chaos:
+        ipv4_address: 172.31.250.10
+    volumes:
+      - shared_storage:/srv/storage
+
+  sshd:
+    build:
+      context: ../..
+      dockerfile: tests/chaos/Dockerfile.sshd
+    networks:
+      chaos:
+        ipv4_address: 172.31.250.11
+    volumes:
+      - shared_storage:/srv/storage
+      - ${CHAOS_DIR}/authorized_keys:/run/chaos/authorized_keys:ro
+      - ${CHAOS_DIR}/ssh_host_ed25519_key:/run/chaos/ssh_host_ed25519_key:ro
+
+  node:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+      - DAC_READ_SEARCH
+    security_opt:
+      - apparmor=unconfined
+    read_only: true
+    tmpfs:
+      - /run:size=128m,mode=0755
+      - /tmp:size=128m,mode=1777
+    devices:
+      - /dev/fuse:/dev/fuse
+    depends_on:
+      - samba
+      - sshd
+    networks:
+      chaos:
+        ipv4_address: 172.31.250.20
+    ports:
+      - 127.0.0.1:${CHAOS_S3_PORT}:8333
+      - 127.0.0.1:${CHAOS_HEALTH_PORT}:9090
+    volumes:
+      - ${CHAOS_DIR}/state:/var/lib/s3-storage-node
+      - ${CHAOS_DIR}/config.toml:/etc/s3-storage-node/config.toml:ro
+      - ${CHAOS_DIR}/cifs_credentials:/run/secrets/cifs_credentials:ro
+      - ${CHAOS_DIR}/s3_access_key:/run/secrets/s3_access_key:ro
+      - ${CHAOS_DIR}/s3_secret_key:/run/secrets/s3_secret_key:ro
+      - ${CHAOS_DIR}/ssh_identity:/run/secrets/ssh_identity:ro
+      - ${CHAOS_DIR}/ssh_known_hosts:/run/secrets/ssh_known_hosts:ro
+    stop_grace_period: 20s
+
+volumes:
+  shared_storage:
+
+networks:
+  chaos:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
