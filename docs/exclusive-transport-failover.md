@@ -5,8 +5,10 @@ The data target can optionally expose the same remote dataset through a preferre
 ## Safety invariants
 
 - Exactly one transport is selected for a worker generation.
-- The old generation is withdrawn and network-fenced before SeaweedFS shutdown or transport replacement.
-- A replacement generation is never started while an old SeaweedFS process still owns local master, filer, or index state.
+- An unexpected storage failure withdraws readiness and network-fences the old generation before SeaweedFS shutdown or transport replacement.
+- A controlled operator switch withdraws readiness, drains the sole active generation while its transport is still healthy, then network-fences it before unmounting or selecting the replacement transport.
+- No replacement generation is started until the old generation is physically fenced.
+- A replacement generation is never started while an unfenced old SeaweedFS process still owns local master, filer, or index state.
 - CIFS and SSHFS must expose the same sentinel and SeaweedFS volume directory.
 - Two protocols to one storage service are reported as one failure domain, not two replicas.
 - Failback is manual and sticky. A healthy SSHFS recovery generation remains active until an operator requests CIFS or the SSHFS transport itself fails.
@@ -72,7 +74,7 @@ Populate `ssh-known-hosts` out of band from a trusted host-key source. The guard
 
 ## Selection behavior
 
-On first startup, the lowest-priority-number transport is selected. A transport-related mount, enrollment, or storage-probe failure is recorded, the generation is fenced, and the next eligible transport is selected after recovery backoff. Generic SeaweedFS or HAProxy failures do not condemn the active transport.
+On first startup, the lowest-priority-number transport is selected. A transport-related mount, enrollment, or storage-probe failure is recorded, the generation is fenced before shutdown, and the next eligible transport is selected after recovery backoff. Generic SeaweedFS or HAProxy failures do not condemn the active transport.
 
 A successful fallback is sticky. Cooldown expiry does not automatically move traffic back to CIFS. When every configured transport is cooling down, the node remains offline until one is eligible rather than immediately recycling a known-failed path.
 
@@ -92,7 +94,7 @@ docker compose exec s3-storage-node \
   --transport cifs-primary
 ```
 
-The running guardian notices the request, withdraws readiness, fences and retires the current generation, mounts the requested transport in a new generation, runs full durability probes and the S3 canary, and only then returns online.
+The running guardian notices the request and withdraws readiness. Because this is an explicit switch rather than an unexpected storage fault, it first drains the only active SeaweedFS generation while that transport is still healthy. It then network-fences and retires the generation, mounts the requested transport in a new generation, runs full durability probes and the S3 canary, and only then returns online. The persisted request is not consumed until the guardian has verified that no prior process blocks creation of the replacement generation.
 
 ## Combined chaos certification
 
