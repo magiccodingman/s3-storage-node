@@ -37,6 +37,11 @@ class Guardian(GenerationGuardian):
     def _begin_generation(self) -> None:
         self._transport_failure = False
         self._controlled_transport_switch = False
+        # Do not consume a persisted operator request until the guardian can
+        # actually create its replacement generation. A previously blocked
+        # process must leave the request pending rather than silently turning
+        # it into an automatic fallback decision on the next retry.
+        self._ensure_no_lingering_processes()
         if self.transport_selector is not None:
             self.health.set("SELECTING_TRANSPORT", False, "selecting one exclusive data transport")
             self.active_transport = self.transport_selector.select()
@@ -161,6 +166,29 @@ class Guardian(GenerationGuardian):
                     current=self.active_transport,
                     requested=requested,
                 )
+                # A storage fault must remain fence-first, but a healthy,
+                # operator-controlled switch can drain the sole active
+                # generation before cutting its namespace network. This avoids
+                # trapping SeaweedFS shutdown in an uninterruptible FUSE flush.
+                # No replacement generation exists yet, readiness is already
+                # withdrawn, and the generic recovery path still fences this
+                # generation before unmounting or selecting the requested path.
+                self._stop_seaweed()
+                if self.lingering_processes:
+                    event(
+                        "warning",
+                        "storage_transport_drain_incomplete",
+                        current=self.active_transport,
+                        requested=requested,
+                        processes=",".join(process.name for process in self.lingering_processes),
+                    )
+                else:
+                    event(
+                        "info",
+                        "storage_transport_drained",
+                        current=self.active_transport,
+                        requested=requested,
+                    )
                 raise TransportSwitchRequested(f"operator requested transport switch to {requested}")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
