@@ -7,14 +7,10 @@ import time
 from . import __version__
 from .config import ConfigError, load_config
 from .logging import event
+from .safe_writer_lease import SafeWriterLeaseController, load_writer_lease
 from .transport_failover import TransportFailoverError, load_exclusive_failover
 from .transport_guardian import Guardian as TransportGuardian
-from .writer_lease import (
-    WriterLeaseController,
-    WriterLeaseError,
-    WriterLeaseLost,
-    load_writer_lease,
-)
+from .writer_lease import WriterLeaseError, WriterLeaseLost
 
 
 class Guardian(TransportGuardian):
@@ -23,7 +19,7 @@ class Guardian(TransportGuardian):
     def __init__(self, config, config_path: str) -> None:
         super().__init__(config, config_path)
         self.writer_lease_config = load_writer_lease(config_path, config)
-        self.writer_epoch = WriterLeaseController(
+        self.writer_epoch = SafeWriterLeaseController(
             self.writer_lease_config,
             on_update=self._publish_writer_epoch,
             on_at_risk=self._writer_epoch_at_risk,
