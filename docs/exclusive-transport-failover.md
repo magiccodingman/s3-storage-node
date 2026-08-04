@@ -6,7 +6,7 @@ The data target can optionally expose the same remote dataset through a preferre
 
 - Exactly one transport is selected for a worker generation.
 - An unexpected storage failure withdraws readiness and network-fences the old generation before SeaweedFS shutdown or transport replacement.
-- A controlled operator switch withdraws readiness, drains the sole active generation while its transport is still healthy, then network-fences it before unmounting or selecting the replacement transport.
+- A controlled operator switch withdraws readiness, drains the sole active generation while its transport is still healthy, cleanly detaches that transport, then network-fences the generation before selecting a replacement.
 - No replacement generation is started until the old generation is physically fenced.
 - A replacement generation is never started while an unfenced old SeaweedFS process still owns local master, filer, or index state.
 - CIFS and SSHFS must expose the same sentinel and SeaweedFS volume directory.
@@ -94,7 +94,7 @@ docker compose exec s3-storage-node \
   --transport cifs-primary
 ```
 
-The running guardian notices the request and withdraws readiness. Because this is an explicit switch rather than an unexpected storage fault, it first drains the only active SeaweedFS generation while that transport is still healthy. It then network-fences and retires the generation, mounts the requested transport in a new generation, runs full durability probes and the S3 canary, and only then returns online. The persisted request is not consumed until the guardian has verified that no prior process blocks creation of the replacement generation.
+The running guardian notices the request and withdraws readiness. Because this is an explicit switch rather than an unexpected storage fault, it first drains the only active SeaweedFS generation and cleanly unmounts the active transport while that transport is still healthy. It then network-fences and retires the generation, mounts the requested transport in a new generation, runs full durability probes and the S3 canary, and only then returns online. The persisted request is not consumed until the guardian has verified that no prior process or storage helper blocks creation of the replacement generation.
 
 ## Combined chaos certification
 
