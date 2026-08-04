@@ -52,10 +52,25 @@ class SafeWriterLeaseController(WriterLeaseController):
     withdrawn readiness and fenced the worker generation.
     """
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._operation_guard = threading.Lock()
+        self._abandoned_operations: list[threading.Thread] = []
+
     def _bounded_call(self, operation: Callable[[], T], timeout: float, description: str) -> T:
         completed = threading.Event()
         values: list[T] = []
         errors: list[BaseException] = []
+
+        with self._operation_guard:
+            self._abandoned_operations = [
+                thread for thread in self._abandoned_operations if thread.is_alive()
+            ]
+            if self._abandoned_operations and description != "takeover block":
+                names = ", ".join(thread.name for thread in self._abandoned_operations)
+                raise WriterLeaseOperationTimeout(
+                    f"previous PostgreSQL writer lease operation is still running: {names}"
+                )
 
         def run() -> None:
             try:
@@ -72,6 +87,8 @@ class SafeWriterLeaseController(WriterLeaseController):
         )
         thread.start()
         if not completed.wait(max(0.001, timeout)):
+            with self._operation_guard:
+                self._abandoned_operations.append(thread)
             raise WriterLeaseOperationTimeout(
                 f"postgres writer lease {description} exceeded {timeout:.3f} seconds"
             )
