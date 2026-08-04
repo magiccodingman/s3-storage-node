@@ -7,6 +7,7 @@ import os
 import secrets
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,13 +46,7 @@ def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
 
 
 def ensure_ip_forwarding(path: Path = Path("/proc/sys/net/ipv4/ip_forward")) -> None:
-    """Enable IPv4 forwarding, accepting a pre-enabled read-only sysctl.
-
-    Container runtimes can apply the network-namespace sysctl before process
-    startup and then expose `/proc/sys` read-only. Rewriting an already-enabled
-    value is unnecessary and used to make namespace mode fail despite the
-    required forwarding behavior already being active.
-    """
+    """Enable IPv4 forwarding, accepting a pre-enabled read-only sysctl."""
 
     try:
         current = path.read_text(encoding="ascii").strip()
@@ -72,24 +67,73 @@ def ensure_ip_forwarding(path: Path = Path("/proc/sys/net/ipv4/ip_forward")) -> 
 
 
 def namespace_visible_command(command: list[str]) -> list[str]:
-    """Expose namespace-managed service listeners to the supervisor veth.
-
-    SeaweedFS components still advertise and reach one another through loopback
-    inside the worker namespace. Only the bind address is widened so the root
-    guardian and HAProxy can certify and route to the worker namespace address.
-    """
+    """Expose namespace-managed service listeners to the supervisor veth."""
 
     return ["-ip.bind=0.0.0.0" if argument == "-ip.bind=127.0.0.1" else argument for argument in command]
 
 
-class LocalWriterLease:
-    """Exclusive ownership of one appliance state directory.
+def resolver_nameservers(path: Path) -> tuple[str, ...]:
+    """Return validated resolver IPs from the guardian namespace configuration."""
 
-    This is deliberately local. It prevents two guardians from sharing the same
-    persistent state directory, but does not claim to fence a second host with a
-    different state directory. A distributed lease backend can implement the
-    same interface later.
-    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise GenerationError(f"unable to read resolver configuration {path}: {exc}") from exc
+
+    nameservers: list[str] = []
+    for line in lines:
+        fields = line.split()
+        if not fields or fields[0] != "nameserver":
+            continue
+        if len(fields) < 2:
+            raise GenerationError(f"invalid nameserver line in {path}: {line!r}")
+        try:
+            address = str(ipaddress.ip_address(fields[1]))
+        except ValueError as exc:
+            raise GenerationError(f"invalid nameserver address in {path}: {fields[1]!r}") from exc
+        if address not in nameservers:
+            nameservers.append(address)
+    if not nameservers:
+        raise GenerationError(f"resolver configuration {path} contains no nameserver entries")
+    return tuple(nameservers)
+
+
+def render_worker_resolv_conf(source: Path, destination: Path, gateway: str) -> None:
+    """Write a worker-only resolv.conf that reaches the root-side DNS relay."""
+
+    try:
+        source_lines = source.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise GenerationError(f"unable to read resolver configuration {source}: {exc}") from exc
+
+    try:
+        gateway_ip = str(ipaddress.ip_address(gateway))
+    except ValueError as exc:
+        raise GenerationError(f"invalid worker DNS gateway: {gateway!r}") from exc
+
+    preserved: list[str] = []
+    for line in source_lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        key = stripped.split(maxsplit=1)[0]
+        if key in {"search", "domain", "options"}:
+            preserved.append(stripped)
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write(f"nameserver {gateway_ip}\n")
+        for line in preserved:
+            handle.write(line + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.chmod(0o644)
+    temporary.replace(destination)
+
+
+class LocalWriterLease:
+    """Exclusive ownership of one appliance state directory."""
 
     def __init__(self, state_dir: Path, node_name: str) -> None:
         self.path = state_dir / "writer.lock"
@@ -140,7 +184,9 @@ class WorkerGeneration:
     worker_address: str
     gateway: str
     run_command: RunCommand = _run
+    resolver_config: Path = Path("/etc/resolv.conf")
     keeper: subprocess.Popen[bytes] | None = None
+    dns_proxy: subprocess.Popen[bytes] | None = None
     fenced: bool = False
     fence_reason: str = ""
 
@@ -163,6 +209,7 @@ class WorkerGeneration:
             return
         if self.mode != "namespace":
             raise GenerationError(f"unsupported worker fencing mode: {self.mode}")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.keeper = subprocess.Popen(
             ["unshare", "--mount", "--net", "--propagation", "private", "--", "sleep", "infinity"],
             stdin=subprocess.DEVNULL,
@@ -183,6 +230,7 @@ class WorkerGeneration:
             raise GenerationError("timed out creating worker namespace")
         try:
             self._configure_network()
+            self._configure_dns()
         except Exception:
             self.fence("namespace setup failed")
             self.stop_keeper()
@@ -208,14 +256,63 @@ class WorkerGeneration:
         self.run_command([*prefix, "ip", "route", "replace", "default", "via", self.gateway])
         ensure_ip_forwarding()
         subnet = str(host.network)
-        self._ensure_iptables(["-t", "nat", "-C", "POSTROUTING", "-s", subnet, "-j", "MASQUERADE"],
-                               ["-t", "nat", "-A", "POSTROUTING", "-s", subnet, "-j", "MASQUERADE"])
-        self._ensure_iptables(["-C", "FORWARD", "-i", self.HOST_LINK, "-j", "ACCEPT"],
-                               ["-A", "FORWARD", "-i", self.HOST_LINK, "-j", "ACCEPT"])
+        self._ensure_iptables(
+            ["-t", "nat", "-C", "POSTROUTING", "-s", subnet, "-j", "MASQUERADE"],
+            ["-t", "nat", "-A", "POSTROUTING", "-s", subnet, "-j", "MASQUERADE"],
+        )
+        self._ensure_iptables(
+            ["-C", "FORWARD", "-i", self.HOST_LINK, "-j", "ACCEPT"],
+            ["-A", "FORWARD", "-i", self.HOST_LINK, "-j", "ACCEPT"],
+        )
         self._ensure_iptables(
             ["-C", "FORWARD", "-o", self.HOST_LINK, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"],
             ["-A", "FORWARD", "-o", self.HOST_LINK, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"],
         )
+
+    def _configure_dns(self) -> None:
+        if self.keeper is None:
+            raise GenerationError("worker namespace is not running")
+        upstreams = resolver_nameservers(self.resolver_config)
+        gateway = str(ipaddress.ip_address(self.gateway))
+        worker_resolv = self.runtime_dir / "resolv.conf"
+        ready_file = self.runtime_dir / "dns-proxy.ready"
+        render_worker_resolv_conf(self.resolver_config, worker_resolv, gateway)
+        command = [
+            sys.executable,
+            "-m",
+            "s3_storage_node.dns_proxy",
+            "--listen-address",
+            gateway,
+            "--ready-file",
+            str(ready_file),
+        ]
+        for upstream in upstreams:
+            command.extend(["--upstream", upstream])
+        self.dns_proxy = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if ready_file.exists():
+                break
+            if self.dns_proxy.poll() is not None:
+                stderr = b"" if self.dns_proxy.stderr is None else self.dns_proxy.stderr.read()
+                raise GenerationError(f"worker DNS proxy exited during startup: {stderr.decode(errors='replace').strip()}")
+            time.sleep(0.05)
+        else:
+            self.stop_dns_proxy()
+            raise GenerationError("timed out starting worker DNS proxy")
+
+        mount_prefix = ["nsenter", "--target", str(self.keeper.pid), "--mount", "--"]
+        try:
+            self.run_command([*mount_prefix, "mount", "--bind", str(worker_resolv), "/etc/resolv.conf"])
+        except Exception:
+            self.stop_dns_proxy()
+            raise
 
     def _ensure_iptables(self, check_args: list[str], add_args: list[str]) -> None:
         checked = subprocess.run(["iptables", "-w", *check_args], text=True, capture_output=True, check=False)
@@ -248,9 +345,28 @@ class WorkerGeneration:
             )
             if remaining.returncode == 0:
                 raise GenerationError(f"failed to fence worker generation {self.generation}: {self.HOST_LINK} still exists")
+            self.stop_dns_proxy()
         self.fenced = True
         self.fence_reason = reason
         self._persist("fenced")
+
+    def stop_dns_proxy(self) -> None:
+        proxy = self.dns_proxy
+        self.dns_proxy = None
+        if proxy is None or proxy.poll() is not None:
+            return
+        try:
+            os.killpg(proxy.pid, signal.SIGTERM)
+            proxy.wait(timeout=2)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(proxy.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                proxy.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
 
     def stop_keeper(self) -> None:
         keeper = self.keeper
@@ -274,6 +390,7 @@ class WorkerGeneration:
         try:
             self.fence(self.fence_reason or "generation retired")
         finally:
+            self.stop_dns_proxy()
             self.stop_keeper()
         self._persist("retired")
 
