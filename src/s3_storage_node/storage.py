@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Iterable
@@ -22,6 +23,7 @@ from .durability import append_durability_probe as _append_durability_probe
 from .durability import fsync_directory, temporary_durability_probe
 from .mounts import MountInfo, decode_mountinfo_path, find_mount, read_mountinfo
 from .sentinel import SentinelError, sentinel_v2_payload, validate_sentinel_payload
+from .ssh_credentials import SshCredentialsError, read_password_credentials, ssh_source_username
 
 
 class StorageError(RuntimeError):
@@ -60,13 +62,11 @@ def verify_block_identity(target: TargetConfig) -> None:
             values[key] = value
     if values.get("UUID") != target.expected_uuid:
         raise StorageError(
-            f"device UUID mismatch for {target.name}: expected {target.expected_uuid}, "
-            f"got {values.get('UUID', '<none>')}"
+            f"device UUID mismatch for {target.name}: expected {target.expected_uuid}, got {values.get('UUID', '<none>')}"
         )
     if values.get("TYPE") != target.expected_filesystem:
         raise StorageError(
-            f"filesystem mismatch for {target.name}: expected {target.expected_filesystem}, "
-            f"got {values.get('TYPE', '<none>')}"
+            f"filesystem mismatch for {target.name}: expected {target.expected_filesystem}, got {values.get('TYPE', '<none>')}"
         )
 
 
@@ -79,10 +79,7 @@ def _mount_cifs(target: TargetConfig) -> None:
     for index, profile in enumerate(profiles):
         options = [f"credentials={target.credentials_file}", *profile]
         try:
-            _run(
-                ["mount", "-t", "cifs", target.source, str(target.mountpoint), "-o", ",".join(options)],
-                timeout=30,
-            )
+            _run(["mount", "-t", "cifs", target.source, str(target.mountpoint), "-o", ",".join(options)], timeout=30)
             return
         except StorageError as exc:
             last_error = exc
@@ -131,57 +128,105 @@ def _stop_sshfs_process(target: TargetConfig) -> None:
     pid_path.unlink(missing_ok=True)
 
 
+def _sshfs_error(stderr_file, password: str = "") -> str:
+    try:
+        stderr_file.flush()
+        stderr_file.seek(0)
+        detail = stderr_file.read().decode(errors="replace").strip()
+    except (OSError, AttributeError):
+        return ""
+    if password:
+        detail = detail.replace(password, "<redacted>")
+    return detail[-2000:]
+
+
 def _mount_sshfs(target: TargetConfig) -> None:
-    if not target.ssh_identity_file or not target.ssh_known_hosts_file:
-        raise StorageError(f"SSHFS transport {target.transport_name or target.name} is missing identity configuration")
-    for path, label in (
-        (target.ssh_identity_file, "identity file"),
-        (target.ssh_known_hosts_file, "known-hosts file"),
-    ):
-        if not Path(path).is_file():
-            raise StorageError(f"SSHFS {label} does not exist: {path}")
-    runtime_identity = Path(target.ssh_runtime_identity_file or target.ssh_identity_file)
-    if runtime_identity != Path(target.ssh_identity_file):
-        runtime_identity.parent.mkdir(parents=True, exist_ok=True)
-        temporary = runtime_identity.with_suffix(runtime_identity.suffix + ".tmp")
-        temporary.write_bytes(Path(target.ssh_identity_file).read_bytes())
-        os.chmod(temporary, 0o600)
-        temporary.replace(runtime_identity)
+    transport = target.transport_name or target.name
+    if not target.ssh_known_hosts_file:
+        raise StorageError(f"SSHFS transport {transport} is missing known-hosts configuration")
+    known_hosts = Path(target.ssh_known_hosts_file)
+    if not known_hosts.is_file():
+        raise StorageError(f"SSHFS known-hosts file does not exist: {known_hosts}")
+
+    password = ""
+    if target.ssh_auth_mode == "key":
+        if not target.ssh_identity_file:
+            raise StorageError(f"SSHFS transport {transport} is missing identity configuration")
+        identity = Path(target.ssh_identity_file)
+        if not identity.is_file():
+            raise StorageError(f"SSHFS identity file does not exist: {identity}")
+        runtime_identity = Path(target.ssh_runtime_identity_file or target.ssh_identity_file)
+        if runtime_identity != identity:
+            runtime_identity.parent.mkdir(parents=True, exist_ok=True)
+            temporary = runtime_identity.with_suffix(runtime_identity.suffix + ".tmp")
+            temporary.write_bytes(identity.read_bytes())
+            os.chmod(temporary, 0o600)
+            temporary.replace(runtime_identity)
+    elif target.ssh_auth_mode == "password":
+        if not target.ssh_credentials_file:
+            raise StorageError(f"SSHFS transport {transport} is missing password credentials configuration")
+        try:
+            credentials = read_password_credentials(target.ssh_credentials_file)
+            source_username = ssh_source_username(target.source)
+        except SshCredentialsError as exc:
+            raise StorageError(str(exc)) from exc
+        if credentials.username != source_username:
+            raise StorageError(
+                f"SSHFS source username {source_username!r} does not match credentials username {credentials.username!r}"
+            )
+        password = credentials.password
+    else:
+        raise StorageError(f"unsupported SSHFS authentication mode: {target.ssh_auth_mode}")
+
     command = ["sshfs", "-f", target.source, str(target.mountpoint)]
     if target.mount_options:
         command.extend(["-o", ",".join(target.mount_options)])
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    deadline = time.monotonic() + 25
-    try:
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                raise StorageError(
-                    f"SSHFS transport {target.transport_name or target.name} exited with code {process.returncode}"
-                )
-            if find_mount(target.mountpoint) is not None:
-                pid_path = _sshfs_pid_path(target)
-                if pid_path is not None:
-                    pid_path.parent.mkdir(parents=True, exist_ok=True)
-                    temporary = pid_path.with_suffix(pid_path.suffix + ".tmp")
-                    temporary.write_text(f"{process.pid}\n", encoding="ascii")
-                    os.chmod(temporary, 0o600)
-                    temporary.replace(pid_path)
-                return
-            time.sleep(0.1)
-        raise StorageError(f"timed out waiting for SSHFS transport {target.transport_name or target.name}")
-    except Exception:
-        if process.poll() is None:
-            process.terminate()
+    with tempfile.TemporaryFile(mode="w+b") as stderr_file:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE if target.ssh_auth_mode == "password" else subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_file,
+            text=True,
+        )
+        if target.ssh_auth_mode == "password":
+            assert process.stdin is not None
             try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-        raise
+                process.stdin.write(password + "\n")
+                process.stdin.flush()
+            except BrokenPipeError:
+                pass
+            finally:
+                process.stdin.close()
+
+        deadline = time.monotonic() + 25
+        try:
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    detail = _sshfs_error(stderr_file, password)
+                    suffix = f": {detail}" if detail else ""
+                    raise StorageError(f"SSHFS transport {transport} exited with code {process.returncode}{suffix}")
+                if find_mount(target.mountpoint) is not None:
+                    pid_path = _sshfs_pid_path(target)
+                    if pid_path is not None:
+                        pid_path.parent.mkdir(parents=True, exist_ok=True)
+                        temporary = pid_path.with_suffix(pid_path.suffix + ".tmp")
+                        temporary.write_text(f"{process.pid}\n", encoding="ascii")
+                        os.chmod(temporary, 0o600)
+                        temporary.replace(pid_path)
+                    return
+                time.sleep(0.1)
+            detail = _sshfs_error(stderr_file, password)
+            suffix = f": {detail}" if detail else ""
+            raise StorageError(f"timed out waiting for SSHFS transport {transport}{suffix}")
+        except Exception:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            raise
 
 
 def mount_target(target: TargetConfig) -> None:
@@ -191,7 +236,6 @@ def mount_target(target: TargetConfig) -> None:
         return
     if find_mount(target.mountpoint):
         return
-
     prepare_barrier(target)
     if target.type == "cifs":
         _mount_cifs(target)
@@ -218,22 +262,16 @@ def unmount_target(target: TargetConfig) -> None:
         return
     if target.type == "sshfs":
         result = subprocess.run(
-            ["fusermount3", "-u", "-z", str(target.mountpoint)],
-            text=True,
-            capture_output=True,
-            timeout=15,
-            check=False,
+            ["fusermount3", "-u", "-z", str(target.mountpoint)], text=True,
+            capture_output=True, timeout=15, check=False,
         )
         if result.returncode == 0:
             _stop_sshfs_process(target)
             prepare_barrier(target)
             return
     result = subprocess.run(
-        ["umount", "-l", str(target.mountpoint)],
-        text=True,
-        capture_output=True,
-        timeout=15,
-        check=False,
+        ["umount", "-l", str(target.mountpoint)], text=True,
+        capture_output=True, timeout=15, check=False,
     )
     if result.returncode != 0:
         raise StorageError(result.stderr.strip() or f"failed to unmount {target.mountpoint}")
@@ -291,7 +329,6 @@ def verify_or_initialize_sentinel(target: TargetConfig, uid: int, gid: int) -> N
                 f"storage root missing for {target.name}; set allow_initialize=true only for the first intentional enrollment"
             )
         target.storage_root.mkdir(parents=True, exist_ok=True)
-
     sentinel = _sentinel_path(target)
     if sentinel.exists():
         _load_and_validate_sentinel(target)
@@ -310,7 +347,6 @@ def verify_or_initialize_sentinel(target: TargetConfig, uid: int, gid: int) -> N
         raise StorageError(
             f"sentinel missing for {target.name}; set allow_initialize=true only for the first intentional enrollment"
         )
-
     try:
         os.chown(target.storage_root, uid, gid)
     except OSError:
@@ -337,22 +373,15 @@ def prepare_role_paths(paths: Iterable[Path], uid: int, gid: int) -> None:
 def probe_target(target: TargetConfig, full: bool = False) -> dict[str, int | str]:
     _verify_mount_identity(target)
     identity = _load_and_validate_sentinel(target)
-
     stats = os.statvfs(target.storage_root)
     free_bytes = stats.f_bavail * stats.f_frsize
     total_bytes = stats.f_blocks * stats.f_frsize
     if free_bytes < target.min_free_bytes:
         raise StorageError(f"{target.name} free space below floor: {free_bytes} < {target.min_free_bytes}")
-
     result: dict[str, int | str] = {
-        "free_bytes": free_bytes,
-        "total_bytes": total_bytes,
-        "path": str(target.storage_root),
-        "transport_type": target.type,
-        "transport_name": target.transport_name or target.type,
-        "failure_domains": 1,
-        "durability_class": "transport_acknowledged",
-        **identity.health_fields(),
+        "free_bytes": free_bytes, "total_bytes": total_bytes, "path": str(target.storage_root),
+        "transport_type": target.type, "transport_name": target.transport_name or target.type,
+        "failure_domains": 1, "durability_class": "transport_acknowledged", **identity.health_fields(),
     }
     if target.type == "cifs":
         result.update(certify_cifs_transport(target))
@@ -360,6 +389,7 @@ def probe_target(target: TargetConfig, full: bool = False) -> dict[str, int | st
         result.update({
             "sshfs_sync": 1 if "sshfs_sync" in target.mount_options else 0,
             "transport_observed": 1,
+            "ssh_auth_mode": target.ssh_auth_mode,
         })
     if full:
         try:

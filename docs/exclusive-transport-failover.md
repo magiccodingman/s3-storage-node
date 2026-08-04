@@ -1,29 +1,14 @@
 # Exclusive CIFS-to-SSHFS transport failover
 
-The data target can optionally expose the same remote dataset through a preferred CIFS transport and one or more SSHFS recovery transports. This is generation-level failover, not per-I/O path switching.
+The data target can expose one logical dataset through a preferred CIFS route and one or more exclusive SSHFS recovery routes. This is generation-level failover, not per-I/O switching. Exactly one route is writable at a time, and every replacement generation is physically network-fenced from the old one first.
 
-## Safety invariants
+## Authentication choices
 
-- Exactly one transport is selected for a worker generation.
-- An unexpected storage failure withdraws readiness and network-fences the old generation before SeaweedFS shutdown or transport replacement.
-- A controlled operator switch withdraws readiness, drains the sole active generation while its transport is still healthy, cleanly detaches that transport, then network-fences the generation before selecting a replacement.
-- No replacement generation is started until the old generation is physically fenced.
-- A replacement generation is never started while an unfenced old SeaweedFS process still owns local master, filer, or index state.
-- CIFS and SSHFS must expose the same sentinel and SeaweedFS volume directory.
-- Two protocols to one storage service are reported as one failure domain, not two replicas.
-- Failback is manual and sticky. A healthy SSHFS recovery generation remains active until an operator requests CIFS or the SSHFS transport itself fails.
+SSHFS supports either password or private-key authentication. Both modes always require a pinned `known_hosts_file`; client authentication and server identity verification are separate concerns.
 
-SSHFS reconnect is enabled to bound ordinary interruptions, but the guardian does not treat it as transparent file-descriptor failover. Any storage error still withdraws readiness and rebuilds the worker generation.
+### Password authentication
 
-## Shared dataset identity
-
-CIFS and SSHFS are different routes to one logical dataset. New enrollments use the transport-independent Sentinel V2 schema, while existing V1 sentinels remain accepted. The sentinel validates the dataset ID, target role, and subdirectory without encoding a protocol, server address, or mountpoint.
-
-See [Dataset sentinel format](sentinel-format.md).
-
-## Configuration
-
-The existing `[storage.data]` target remains the canonical CIFS primary. Add a nested failover table:
+Password mode accepts the same `username=...` and `password=...` secret format used by `mount.cifs`:
 
 ```toml
 [storage.data.failover]
@@ -32,60 +17,119 @@ primary_name = "cifs-primary"
 primary_priority = 10
 failback_policy = "manual"
 failure_cooldown_seconds = 60
+verify_all_transports_on_startup = true
 
 [[storage.data.failover.transports]]
 name = "sshfs-secondary"
 type = "sshfs"
 priority = 20
+source = "u123456@u123456.your-storagebox.de:/home"
+auth_mode = "password"
+known_hosts_file = "/run/secrets/ssh_known_hosts"
+port = 23
+mount_options = []
+```
+
+When `credentials_file` is omitted, password mode reuses the canonical `[storage.data].credentials_file`. This directly supports providers such as Hetzner Storage Box where SMB and SSH/SFTP use the same account. A separate secret can be selected explicitly:
+
+```toml
+credentials_file = "/run/secrets/ssh_credentials"
+```
+
+The username in `source` must match the credentials file. The password is delivered only through SSHFS standard input using `password_stdin`; it is never included in TOML, process arguments, environment variables, health output, or logs.
+
+### Key authentication
+
+```toml
+[[storage.data.failover.transports]]
+name = "sshfs-secondary"
+type = "sshfs"
+priority = 20
 source = "user@storage.example:/remote/path"
+auth_mode = "key"
 identity_file = "/run/secrets/ssh_identity"
 known_hosts_file = "/run/secrets/ssh_known_hosts"
 port = 22
 mount_options = []
 ```
 
-Namespace fencing is mandatory:
+Existing configurations that provide `identity_file` without `auth_mode` remain key mode. Before mounting, the helper copies the read-only key into the ephemeral runtime directory with mode `0600`.
+
+If `auth_mode` is omitted and only `credentials_file` is present, password mode is inferred. Explicit mode is recommended for new deployments.
+
+## Host verification
+
+`known_hosts_file` is mandatory in both modes. The guardian always enables strict host-key checking and fails closed if the server key is missing or changes. Do not use `StrictHostKeyChecking=no` for an unattended storage writer.
+
+## Startup verification
+
+With the default:
 
 ```toml
-[appliance]
-worker_fencing_mode = "namespace"
+verify_all_transports_on_startup = true
 ```
 
-The guardian owns authentication, host verification, timeout, reconnect, synchronous-write, FUSE permission, UID/GID, and umask options. `mount_options` uses a narrow performance-tuning allowlist; unknown or security-sensitive SSH/FUSE options are rejected so configuration cannot silently weaken the failover profile.
+the guardian sequentially certifies every configured route before first use:
 
-The private key may be supplied as a read-only Docker secret. Before mounting, the helper copies it into the ephemeral runtime directory with mode `0600`; the source secret is never modified.
+1. mount and authenticate one route;
+2. verify the expected SMB/SSH endpoint and shared dataset sentinel;
+3. run the persistent append and temporary write/read/delete durability probes;
+4. unmount it before testing the next route.
+
+Only one route is mounted at a time. Successful verification is persisted against a SHA-256 fingerprint of the transport settings and credential, private-key, and known-hosts files. Secret contents are not stored. Changing any of those inputs invalidates the marker and forces all-route verification again.
+
+A routine restart with unchanged verified inputs does not require every alternate route to be online. The selected serving route is still mounted, sentinel-checked, and durability-probed on every generation before readiness opens.
+
+Set:
+
+```toml
+verify_all_transports_on_startup = false
+```
+
+when an intentionally unavailable alternate must not block initial deployment. This disables only inactive-route preflight; it never disables certification of the selected serving route.
+
+Startup-verification failures are attributed to the route actually being tested rather than automatically condemning the selected route.
 
 ## Docker
 
-SSHFS requires `/dev/fuse`. Start with the optional Compose overlay:
+SSHFS requires `/dev/fuse` and namespace fencing requires the existing `SYS_ADMIN` and `NET_ADMIN` capabilities.
+
+Password mode reusing CIFS credentials needs only the host-key secret in addition to the base deployment:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.sshfs.yml up -d
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.sshfs-password.yml \
+  up -d
 ```
 
-Create the two secret files referenced by the overlay:
+Files:
 
 ```text
-secrets/ssh-identity
+secrets/cifs-credentials
 secrets/ssh-known-hosts
 ```
 
-Populate `ssh-known-hosts` out of band from a trusted host-key source. The guardian always enables strict host-key checking and batch authentication.
-
-## Selection behavior
-
-On first startup, the lowest-priority-number transport is selected. A transport-related mount, enrollment, or storage-probe failure is recorded, the generation is fenced before shutdown, and the next eligible transport is selected after recovery backoff. Generic SeaweedFS or HAProxy failures do not condemn the active transport.
-
-A successful fallback is sticky. Cooldown expiry does not automatically move traffic back to CIFS. When every configured transport is cooling down, the node remains offline until one is eligible rather than immediately recycling a known-failed path.
-
-Inspect state:
+Key mode uses:
 
 ```bash
-docker compose exec s3-storage-node \
-  s3-storage-node transport-status --config /etc/s3-storage-node/config.toml
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.sshfs.yml \
+  up -d
 ```
 
-Request a controlled switch:
+and additionally requires:
+
+```text
+secrets/ssh-identity
+```
+
+## Selection and failback
+
+The lowest-priority-number eligible route is selected initially. A transport mount, authentication, sentinel, or durability failure withdraws readiness, fences the generation, records that route as failed, and allows the next eligible route after recovery backoff. Generic SeaweedFS or HAProxy failures do not condemn a transport.
+
+Fallback is sticky. Recovery of CIFS does not automatically move a healthy SSHFS generation back. Request controlled failback with:
 
 ```bash
 docker compose exec s3-storage-node \
@@ -94,41 +138,26 @@ docker compose exec s3-storage-node \
   --transport cifs-primary
 ```
 
-The running guardian notices the request and withdraws readiness. Because this is an explicit switch rather than an unexpected storage fault, it first drains the only active SeaweedFS generation and cleanly unmounts the active transport while that transport is still healthy. It then network-fences and retires the generation, mounts the requested transport in a new generation, runs full durability probes and the S3 canary, and only then returns online. The persisted request is not consumed until the guardian has verified that no prior process or storage helper blocks creation of the replacement generation.
+The guardian drains SeaweedFS, cleanly detaches the healthy route, fences the old generation, certifies the requested route in a new generation, and only then restores readiness.
 
-## Combined chaos certification
-
-CI includes a privileged Docker lab rather than relying only on mocked transport selection. A Samba container and an OpenSSH/SFTP container expose the same backing volume to the real appliance image.
-
-The harness performs the following sequence:
-
-1. Start the appliance on CIFS and create a Sentinel V2 document.
-2. Upload and retrieve randomized signed S3 objects through HAProxy.
-3. Drop port 445 packets while the node is online.
-4. Verify readiness withdrawal and persistent recording of the CIFS failure.
-5. Verify the old generation veth is absent before replacement.
-6. Recover through SSHFS and read every pre-failure object.
-7. Write more S3 objects on SSHFS.
-8. Restore Samba and prove there is no automatic failback.
-9. Request controlled failback and verify every object through CIFS.
-10. Fail CIFS again, kill the guardian after the failure is persisted, and verify restart resumes on SSHFS.
-11. Replace only the sentinel with the legacy V1 form, restart again, and prove V1 remains accepted without being rewritten.
-
-Run it explicitly with:
+Inspect transport and startup-verification state with:
 
 ```bash
-RUN_TRANSPORT_CHAOS=1 PYTHONPATH=src \
-  python -m pytest -q -s tests/test_transport_chaos_integration.py
+docker compose exec s3-storage-node \
+  s3-storage-node transport-status --config /etc/s3-storage-node/config.toml
 ```
 
-The harness requires Docker Compose, `/dev/fuse`, and a host kernel that permits CIFS and namespace mounts inside the test container.
+Credential fingerprints are never exposed.
+
+## Integration certification
+
+CI uses real OpenSSH and real SSHFS mounts for both password and key authentication, including sentinel validation and full durability probes. The Docker chaos harness continues to exercise CIFS failure, physical fencing, SSHFS recovery, sticky fallback, controlled failback, guardian restart, object preservation, and Sentinel V1 compatibility.
 
 ## Deliberate limitations
 
 - No simultaneous CIFS and SSHFS writers.
 - No path-layer or per-I/O fallback.
 - No automatic failback.
-- No cross-host shared-dataset ownership; one appliance owns one dataset.
+- CIFS and SSHFS to the same provider remain one failure domain, not two replicas.
 - No direct SSH-only storage profile.
-- No NVMe write-back, queueing, or tiered-storage semantics.
 - No claim that an SSHFS acknowledgement proves physical-media persistence on the remote server.
