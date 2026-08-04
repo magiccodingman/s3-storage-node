@@ -4,7 +4,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends iptables samba \
     && rm -rf /var/lib/apt/lists/*
 
-COPY tests/chaos/samba-entrypoint.sh /usr/local/bin/chaos-samba
+COPY samba-entrypoint.sh /usr/local/bin/chaos-samba
 RUN chmod 0755 /usr/local/bin/chaos-samba
 
 EXPOSE 445
