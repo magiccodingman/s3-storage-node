@@ -6,7 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from s3_storage_node.safe_writer_lease import SafeWriterLeaseController, load_writer_lease
+from s3_storage_node.safe_writer_lease import (
+    SafeWriterLeaseController,
+    WriterLeaseOperationTimeout,
+    load_writer_lease,
+)
 from s3_storage_node.writer_lease import LeaseRecord, WriterLeaseConfig, WriterLeaseError, WriterLeaseLost
 
 
@@ -104,4 +108,6 @@ def test_renewal_timeout_marks_lease_lost_without_waiting_for_late_result() -> N
     assert "exceeded" in lost[0]
     with pytest.raises(WriterLeaseLost):
         controller.assert_usable()
+    with pytest.raises(WriterLeaseOperationTimeout, match="still running"):
+        controller.acquire()
     controller.close(release=False)
