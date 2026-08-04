@@ -18,12 +18,11 @@ def stabilize_transport_chaos_observers(request, monkeypatch):
     obsolete `failures` spelling while the real failover has already succeeded.
     """
 
-    path = getattr(request.node, "path", None)
-    if path is None or path.name != "test_transport_chaos_integration.py":
+    module = request.module
+    if not module.__name__.endswith("test_transport_chaos_integration"):
         yield
         return
 
-    module = request.module
     original_wait_ready = module._wait_ready
 
     def wait_ready(*args, **kwargs):
