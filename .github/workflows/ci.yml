@@ -92,3 +92,5 @@ jobs:
             -c 'unshare --mount --net -- true && ip link add s3-ci-a type veth peer name s3-ci-b && ip link del s3-ci-a'
       - name: Verify SSHFS tooling is present
         run: docker run --rm --entrypoint /usr/bin/sshfs s3-storage-node:ci --version
+      - name: Verify image entrypoint dispatches operator commands
+        run: docker run --rm s3-storage-node:ci --help
