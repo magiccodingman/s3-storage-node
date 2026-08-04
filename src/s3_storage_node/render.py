@@ -127,7 +127,7 @@ frontend s3_public
 backend seaweed_s3
   option httpchk GET /ready
   http-check expect status 200
-  server worker_s3 {backend_host}:{config.seaweed.s3_internal_port} check addr {health_host} port {config.appliance.health_port} inter 2s fall 1 rise 2
+  server worker_s3 {backend_host}:{config.seaweed.s3_internal_port} check addr {health_host} port {config.appliance.health_port} inter 250ms fall 1 rise 1
 '''
     path = config.appliance.runtime_dir / "generated" / "haproxy.cfg"
     write_atomic(path, content, 0o644)

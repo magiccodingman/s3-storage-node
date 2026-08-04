@@ -21,6 +21,7 @@ from .config_types import TargetConfig
 from .durability import append_durability_probe as _append_durability_probe
 from .durability import fsync_directory, temporary_durability_probe
 from .mounts import MountInfo, decode_mountinfo_path, find_mount, read_mountinfo
+from .sentinel import SentinelError, sentinel_v2_payload, validate_sentinel_payload
 
 
 class StorageError(RuntimeError):
@@ -268,6 +269,18 @@ def _sentinel_path(target: TargetConfig) -> Path:
     return target.storage_root / target.sentinel_file
 
 
+def _load_and_validate_sentinel(target: TargetConfig):
+    sentinel = _sentinel_path(target)
+    try:
+        payload = json.loads(sentinel.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise StorageError(f"invalid sentinel on {target.name}: {exc}") from exc
+    try:
+        return validate_sentinel_payload(target, payload)
+    except SentinelError as exc:
+        raise StorageError(str(exc)) from exc
+
+
 def verify_or_initialize_sentinel(target: TargetConfig, uid: int, gid: int) -> None:
     _verify_mount_identity(target)
     if target.type == "cifs":
@@ -281,17 +294,9 @@ def verify_or_initialize_sentinel(target: TargetConfig, uid: int, gid: int) -> N
 
     sentinel = _sentinel_path(target)
     if sentinel.exists():
-        try:
-            payload = json.loads(sentinel.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise StorageError(f"invalid sentinel on {target.name}: {exc}") from exc
-        if payload.get("sentinel_id") != target.sentinel_id:
-            raise StorageError(
-                f"sentinel mismatch for {target.name}: expected {target.sentinel_id}, "
-                f"got {payload.get('sentinel_id', '<none>')}"
-            )
+        _load_and_validate_sentinel(target)
     elif target.allow_initialize:
-        payload = {"sentinel_id": target.sentinel_id, "target": target.name, "version": 1}
+        payload = sentinel_v2_payload(target)
         temporary = sentinel.with_suffix(sentinel.suffix + ".tmp")
         temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
         fd = os.open(temporary, os.O_RDONLY)
@@ -331,10 +336,7 @@ def prepare_role_paths(paths: Iterable[Path], uid: int, gid: int) -> None:
 
 def probe_target(target: TargetConfig, full: bool = False) -> dict[str, int | str]:
     _verify_mount_identity(target)
-    sentinel = _sentinel_path(target)
-    payload = json.loads(sentinel.read_text(encoding="utf-8"))
-    if payload.get("sentinel_id") != target.sentinel_id:
-        raise StorageError(f"sentinel mismatch for {target.name}")
+    identity = _load_and_validate_sentinel(target)
 
     stats = os.statvfs(target.storage_root)
     free_bytes = stats.f_bavail * stats.f_frsize
@@ -350,6 +352,7 @@ def probe_target(target: TargetConfig, full: bool = False) -> dict[str, int | st
         "transport_name": target.transport_name or target.type,
         "failure_domains": 1,
         "durability_class": "transport_acknowledged",
+        **identity.health_fields(),
     }
     if target.type == "cifs":
         result.update(certify_cifs_transport(target))

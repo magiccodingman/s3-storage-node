@@ -44,6 +44,44 @@ def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
         os.close(directory_fd)
 
 
+def ensure_ip_forwarding(path: Path = Path("/proc/sys/net/ipv4/ip_forward")) -> None:
+    """Enable IPv4 forwarding, accepting a pre-enabled read-only sysctl.
+
+    Container runtimes can apply the network-namespace sysctl before process
+    startup and then expose `/proc/sys` read-only. Rewriting an already-enabled
+    value is unnecessary and used to make namespace mode fail despite the
+    required forwarding behavior already being active.
+    """
+
+    try:
+        current = path.read_text(encoding="ascii").strip()
+    except OSError as exc:
+        raise GenerationError(f"unable to inspect namespace forwarding: {exc}") from exc
+    if current == "1":
+        return
+    try:
+        path.write_text("1\n", encoding="ascii")
+    except OSError as exc:
+        raise GenerationError(f"unable to enable namespace forwarding: {exc}") from exc
+    try:
+        enabled = path.read_text(encoding="ascii").strip()
+    except OSError as exc:
+        raise GenerationError(f"unable to verify namespace forwarding: {exc}") from exc
+    if enabled != "1":
+        raise GenerationError(f"namespace forwarding remained disabled after update: {enabled!r}")
+
+
+def namespace_visible_command(command: list[str]) -> list[str]:
+    """Expose namespace-managed service listeners to the supervisor veth.
+
+    SeaweedFS components still advertise and reach one another through loopback
+    inside the worker namespace. Only the bind address is widened so the root
+    guardian and HAProxy can certify and route to the worker namespace address.
+    """
+
+    return ["-ip.bind=0.0.0.0" if argument == "-ip.bind=127.0.0.1" else argument for argument in command]
+
+
 class LocalWriterLease:
     """Exclusive ownership of one appliance state directory.
 
@@ -168,10 +206,7 @@ class WorkerGeneration:
         self.run_command([*prefix, "ip", "addr", "add", self.worker_address, "dev", self.PEER_LINK])
         self.run_command([*prefix, "ip", "link", "set", self.PEER_LINK, "up"])
         self.run_command([*prefix, "ip", "route", "replace", "default", "via", self.gateway])
-        try:
-            Path("/proc/sys/net/ipv4/ip_forward").write_text("1\n", encoding="ascii")
-        except OSError as exc:
-            raise GenerationError(f"unable to enable namespace forwarding: {exc}") from exc
+        ensure_ip_forwarding()
         subnet = str(host.network)
         self._ensure_iptables(["-t", "nat", "-C", "POSTROUTING", "-s", subnet, "-j", "MASQUERADE"],
                                ["-t", "nat", "-A", "POSTROUTING", "-s", subnet, "-j", "MASQUERADE"])
@@ -197,7 +232,7 @@ class WorkerGeneration:
             if uid is None or gid is None:
                 raise GenerationError("worker uid and gid must be supplied together")
             wrapped.extend(["setpriv", f"--reuid={uid}", f"--regid={gid}", "--clear-groups", "--"])
-        wrapped.extend(command)
+        wrapped.extend(namespace_visible_command(command))
         return wrapped
 
     def fence(self, reason: str) -> None:
