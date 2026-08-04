@@ -1,7 +1,7 @@
 services:
   samba:
     build:
-      context: ../..
+      context: ${CHAOS_REPO_ROOT}
       dockerfile: tests/chaos/Dockerfile.samba
     cap_add:
       - NET_ADMIN
@@ -15,7 +15,7 @@ services:
 
   sshd:
     build:
-      context: ../..
+      context: ${CHAOS_REPO_ROOT}
       dockerfile: tests/chaos/Dockerfile.sshd
     networks:
       chaos:
@@ -27,7 +27,7 @@ services:
 
   node:
     build:
-      context: ../..
+      context: ${CHAOS_REPO_ROOT}
       dockerfile: Dockerfile
     cap_add:
       - SYS_ADMIN
