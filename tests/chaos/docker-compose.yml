@@ -1,8 +1,8 @@
 services:
   samba:
     build:
-      context: ${PWD}
-      dockerfile: tests/chaos/Dockerfile.samba
+      context: ${PWD}/tests/chaos
+      dockerfile: Dockerfile.samba
     cap_add:
       - NET_ADMIN
     environment:
@@ -15,8 +15,8 @@ services:
 
   sshd:
     build:
-      context: ${PWD}
-      dockerfile: tests/chaos/Dockerfile.sshd
+      context: ${PWD}/tests/chaos
+      dockerfile: Dockerfile.sshd
     networks:
       chaos:
         ipv4_address: 172.31.250.11
