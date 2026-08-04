@@ -77,10 +77,10 @@ class UdpDnsServer:
                 break
             labels.append(query[offset : offset + length].decode("ascii"))
             offset += length
-        if offset + 4 >= len(query):
+        if offset + 4 > len(query):
             return None
-        question_end = offset + 5
-        qtype = struct.unpack("!H", query[offset + 1 : offset + 3])[0]
+        question_end = offset + 4
+        qtype = struct.unpack("!H", query[offset : offset + 2])[0]
         hostname = ".".join(labels).lower()
         if hostname != self.hostname or qtype != 1:
             return (
