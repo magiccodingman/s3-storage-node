@@ -12,6 +12,7 @@ from s3_storage_node.config_types import (
     SeaweedConfig,
     TargetConfig,
 )
+from s3_storage_node.processes import ProcessError
 from s3_storage_node.transport_guardian import Guardian, TransportSwitchRequested
 
 
@@ -116,11 +117,13 @@ def test_non_storage_failure_keeps_current_transport(tmp_path: Path) -> None:
     assert guardian.active_transport == "cifs-primary"
 
 
-def test_manual_switch_is_fenced_but_not_recorded_as_failure(tmp_path: Path) -> None:
+def test_manual_switch_drains_before_fence_and_is_not_a_failure(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     write_failover(config_path)
     guardian = Guardian(make_config(tmp_path), str(config_path))
     guardian.generation_factory.create = Mock(side_effect=[fake_generation(1), fake_generation(2)])
+    order: list[str] = []
+    guardian._stop_seaweed = Mock(side_effect=lambda: order.append("drain"))
 
     guardian._begin_generation()
     guardian.transport_selector.request("sshfs-secondary")
@@ -128,9 +131,34 @@ def test_manual_switch_is_fenced_but_not_recorded_as_failure(tmp_path: Path) -> 
     with pytest.raises(TransportSwitchRequested, match="operator requested"):
         guardian._interruptible_sleep(1)
     assert guardian._controlled_transport_switch is True
+    guardian._stop_seaweed.assert_called_once_with()
+    assert order == ["drain"]
+
     assert guardian._fence_generation("operator requested transport switch") is True
+    order.append("fence")
+    assert order == ["drain", "fence"]
 
     guardian._begin_generation()
     assert guardian.active_transport == "sshfs-secondary"
     status = guardian.transport_selector.status()
     assert "cifs-primary" not in status["failed"]
+
+
+def test_manual_request_is_not_consumed_while_old_process_lingers(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    write_failover(config_path)
+    guardian = Guardian(make_config(tmp_path), str(config_path))
+    guardian.generation_factory.create = Mock(side_effect=[fake_generation(1), fake_generation(2)])
+
+    guardian._begin_generation()
+    guardian.transport_selector.request("sshfs-secondary")
+    blocked = Mock()
+    blocked.name = "volume"
+    blocked.running.return_value = True
+    guardian.lingering_processes = [blocked]
+
+    with pytest.raises(ProcessError, match="previous SeaweedFS processes are still blocked: volume"):
+        guardian._begin_generation()
+
+    assert guardian.active_transport == "cifs-primary"
+    assert guardian.transport_selector.pending_request() == "sshfs-secondary"
