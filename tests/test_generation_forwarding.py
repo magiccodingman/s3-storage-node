@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from s3_storage_node.generation import GenerationError, ensure_ip_forwarding
+from s3_storage_node.generation import GenerationError, ensure_ip_forwarding, namespace_visible_command
 
 
 class FakeSysctl:
@@ -55,3 +55,30 @@ def test_disabled_read_only_forwarding_fails_closed() -> None:
 
     with pytest.raises(GenerationError, match="unable to enable namespace forwarding"):
         ensure_ip_forwarding(sysctl)  # type: ignore[arg-type]
+
+
+def test_namespace_listener_is_reachable_without_changing_internal_advertisement() -> None:
+    command = [
+        "/usr/local/bin/weed",
+        "master",
+        "-ip=127.0.0.1",
+        "-ip.bind=127.0.0.1",
+        "-port=9333",
+    ]
+
+    visible = namespace_visible_command(command)
+
+    assert visible == [
+        "/usr/local/bin/weed",
+        "master",
+        "-ip=127.0.0.1",
+        "-ip.bind=0.0.0.0",
+        "-port=9333",
+    ]
+    assert command[3] == "-ip.bind=127.0.0.1"
+
+
+def test_namespace_command_rewrite_does_not_touch_storage_helpers() -> None:
+    command = ["python3", "-m", "s3_storage_node.main", "probe", "--target", "data"]
+
+    assert namespace_visible_command(command) == command
