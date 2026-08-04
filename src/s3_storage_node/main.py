@@ -9,6 +9,7 @@ import urllib.request
 
 from .config import ConfigError, load_config
 from .lease_guardian import run_guardian
+from .safe_writer_lease import SafeWriterLeaseController, load_writer_lease
 from .storage import (
     StorageError,
     mount_target,
@@ -23,7 +24,7 @@ from .transport_failover import (
     load_exclusive_failover,
     resolve_target,
 )
-from .writer_lease import WriterLeaseController, WriterLeaseError, load_writer_lease
+from .writer_lease import WriterLeaseError
 
 
 def parser() -> argparse.ArgumentParser:
@@ -85,7 +86,7 @@ def _selector(config_path: str):
 def _writer_lease(config_path: str):
     config = load_config(config_path)
     lease_config = load_writer_lease(config_path, config)
-    return WriterLeaseController(lease_config)
+    return SafeWriterLeaseController(lease_config)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -125,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
             print(str(exc), file=sys.stderr)
             return 1
     if command in {"writer-lease-status", "writer-lease-unblock"}:
-        controller: WriterLeaseController | None = None
+        controller: SafeWriterLeaseController | None = None
         try:
             controller = _writer_lease(args.config)
             if command == "writer-lease-unblock":
