@@ -7,6 +7,7 @@ from . import __version__
 from .config import ConfigError, load_config
 from .generation_guardian import Guardian as GenerationGuardian
 from .logging import event
+from .storage import StorageError
 from .transport_failover import (
     TransportFailoverError,
     TransportSelector,
@@ -31,17 +32,22 @@ class Guardian(GenerationGuardian):
         )
         self.active_transport = ""
         self._controlled_transport_switch = False
+        self._controlled_transport_detached = False
         self._transport_failure = False
         self._online_transport_watch = False
 
     def _begin_generation(self) -> None:
         self._transport_failure = False
         self._controlled_transport_switch = False
+        self._controlled_transport_detached = False
         # Do not consume a persisted operator request until the guardian can
         # actually create its replacement generation. A previously blocked
-        # process must leave the request pending rather than silently turning
-        # it into an automatic fallback decision on the next retry.
+        # process or helper must leave the request pending rather than silently
+        # turning it into an automatic fallback decision on the next retry.
         self._ensure_no_lingering_processes()
+        self._reap_helper_children()
+        if self.helper_children:
+            raise StorageError("a previous storage helper is still blocked; refusing to select another transport")
         if self.transport_selector is not None:
             self.health.set("SELECTING_TRANSPORT", False, "selecting one exclusive data transport")
             self.active_transport = self.transport_selector.select()
@@ -140,12 +146,63 @@ class Guardian(GenerationGuardian):
             self._publish_transport()
         return fenced
 
+    def _repair_targets(self, unmount_all: bool = False) -> None:
+        if self._controlled_transport_detached and not unmount_all:
+            # The only non-path target was cleanly detached before the
+            # controlled fence. Re-entering the now-fenced namespace merely to
+            # repeat an idempotent unmount can strand a helper on FUSE/network
+            # teardown, so let the generic recovery path continue directly to
+            # generation retirement.
+            self._controlled_transport_detached = False
+            return
+        super()._repair_targets(unmount_all=unmount_all)
+
     def _online_loop(self) -> None:
         self._online_transport_watch = True
         try:
             super()._online_loop()
         finally:
             self._online_transport_watch = False
+
+    def _drain_controlled_transport(self, requested: str) -> None:
+        # No replacement generation exists yet and readiness is already false.
+        # Keep the healthy transport connected long enough for SeaweedFS to
+        # close its files, then detach the mount before cutting the namespace
+        # network. The generic exception path still performs the physical fence
+        # before generation retirement or selection of the requested transport.
+        self._stop_seaweed()
+        if self.lingering_processes:
+            event(
+                "warning",
+                "storage_transport_drain_incomplete",
+                current=self.active_transport,
+                requested=requested,
+                processes=",".join(process.name for process in self.lingering_processes),
+            )
+            return
+        try:
+            self._run_helper(
+                "unmount",
+                self.failover.target,
+                timeout=self.config.appliance.startup_timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001 - controlled teardown boundary
+            event(
+                "error",
+                "storage_transport_detach_failed",
+                current=self.active_transport,
+                requested=requested,
+                error=str(exc),
+            )
+            return
+        self._controlled_transport_detached = True
+        event("info", "storage_detached", target=self.failover.target)
+        event(
+            "info",
+            "storage_transport_drained",
+            current=self.active_transport,
+            requested=requested,
+        )
 
     def _interruptible_sleep(self, seconds: float) -> None:
         if not self._online_transport_watch or self.transport_selector is None:
@@ -166,29 +223,7 @@ class Guardian(GenerationGuardian):
                     current=self.active_transport,
                     requested=requested,
                 )
-                # A storage fault must remain fence-first, but a healthy,
-                # operator-controlled switch can drain the sole active
-                # generation before cutting its namespace network. This avoids
-                # trapping SeaweedFS shutdown in an uninterruptible FUSE flush.
-                # No replacement generation exists yet, readiness is already
-                # withdrawn, and the generic recovery path still fences this
-                # generation before unmounting or selecting the requested path.
-                self._stop_seaweed()
-                if self.lingering_processes:
-                    event(
-                        "warning",
-                        "storage_transport_drain_incomplete",
-                        current=self.active_transport,
-                        requested=requested,
-                        processes=",".join(process.name for process in self.lingering_processes),
-                    )
-                else:
-                    event(
-                        "info",
-                        "storage_transport_drained",
-                        current=self.active_transport,
-                        requested=requested,
-                    )
+                self._drain_controlled_transport(requested)
                 raise TransportSwitchRequested(f"operator requested transport switch to {requested}")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
