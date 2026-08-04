@@ -71,6 +71,16 @@ def _selector(config_path: str):
     return config, TransportSelector(config.appliance.state_dir / "guardian", failover)
 
 
+def selected_transport_for_target(target_name: str, explicit: str = "") -> str:
+    """Resolve a helper's transport without leaking data selection to local roles."""
+
+    if explicit:
+        return explicit
+    if target_name == "data":
+        return os.environ.get("S3_STORAGE_NODE_TRANSPORT", "")
+    return ""
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     command = args.command or "run"
@@ -117,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"prepared": True, "paths": [str(path) for path in paths]}))
             return 0
 
-        selected_transport = args.transport or os.environ.get("S3_STORAGE_NODE_TRANSPORT", "")
+        selected_transport = selected_transport_for_target(args.target, args.transport)
         target = resolve_target(args.config, config, args.target, selected_transport)
         if command == "mount":
             mount_target(target)
