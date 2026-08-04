@@ -35,6 +35,8 @@ services:
       - DAC_READ_SEARCH
     security_opt:
       - apparmor=unconfined
+    sysctls:
+      net.ipv4.ip_forward: "1"
     read_only: true
     tmpfs:
       - /run:size=128m,mode=0755
