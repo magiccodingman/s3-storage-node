@@ -20,6 +20,22 @@ from .s3check import run_canary
 from .storage import StorageError, prepare_barrier
 
 
+def namespace_cwd_command(command: list[str], cwd: str | None) -> list[str]:
+    """Establish a working directory after namespace entry, then exec directly."""
+
+    if not cwd:
+        return list(command)
+    return [
+        sys.executable,
+        "-m",
+        "s3_storage_node.process_exec",
+        "--cwd",
+        cwd,
+        "--",
+        *command,
+    ]
+
+
 class Guardian(BaseGuardian):
     """Guardian with isolated worker generations and fence-first recovery."""
 
@@ -249,9 +265,11 @@ class Guardian(BaseGuardian):
         if getattr(self.config.appliance, "worker_fencing_mode", "disabled") != "namespace":
             return processes
         for process in processes:
-            process.command = self._generation_command(process.command, as_worker=True)
+            command = namespace_cwd_command(process.command, process.cwd)
+            process.command = self._generation_command(command, as_worker=True)
             process.uid = None
             process.gid = None
+            process.cwd = None
         return processes
 
     def _worker_endpoint_host(self) -> str:
