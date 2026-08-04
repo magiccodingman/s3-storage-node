@@ -86,18 +86,22 @@ When SSHFS failover is also enabled, include both overlays.
 The guardian validates that:
 
 ```text
-renew interval + fence margin < lease TTL
+renew interval + database operation timeout + fence margin < lease TTL
 retry interval < safe lease window
 connection timeout < safe lease window
 ```
 
-A successful renewal records the database server's expiry time and converts the remaining duration into a local monotonic deadline. This avoids extending the safe serving window because of later wall-clock changes on the appliance.
+PostgreSQL determines row expiry with its own server clock. The guardian deliberately does **not** compare that timestamp with the appliance wall clock. Instead, after a successful acquisition or renewal it subtracts the locally measured operation duration from the configured TTL and creates a local monotonic deadline. Host/database clock skew therefore cannot accidentally lengthen the serving window.
 
-On the first renewal error:
+Every ownership operation is also wrapped in a guardian-side hard timeout. This boundary is independent of libpq connection timeouts, DNS behavior, and PostgreSQL statement progress. If a renewal call outlives that boundary, readiness is withdrawn and the worker is fenced without waiting for the late result.
+
+A late database call can still finish after its result has been abandoned and extend the row. That is conservative: it may delay another node's takeover, but the old worker has already lost readiness and network access. The guardian never issues parallel renewal attempts after such a timeout.
+
+On the first ordinary renewal error:
 
 1. readiness is withdrawn immediately;
 2. the lease enters `WRITER_LEASE_AT_RISK`;
-3. renewal retries continue inside the remaining safe window.
+3. renewal retries continue only when a complete bounded operation still fits inside the remaining safe window.
 
 If renewal recovers before the fence margin, traffic can reopen without restarting SeaweedFS. If the safe deadline is reached, ownership is declared lost and the worker generation is physically fenced.
 
@@ -151,7 +155,7 @@ Health JSON includes:
 - unique owner session;
 - held, healthy, at-risk, lost, and takeover-blocked flags;
 - fencing token;
-- lease expiry and monotonic TTL remaining;
+- projected appliance-side expiry and monotonic TTL remaining;
 - successful renewals and renewal failures;
 - the last renewal error.
 
