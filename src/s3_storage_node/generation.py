@@ -71,6 +71,17 @@ def ensure_ip_forwarding(path: Path = Path("/proc/sys/net/ipv4/ip_forward")) -> 
         raise GenerationError(f"namespace forwarding remained disabled after update: {enabled!r}")
 
 
+def namespace_visible_command(command: list[str]) -> list[str]:
+    """Expose namespace-managed service listeners to the supervisor veth.
+
+    SeaweedFS components still advertise and reach one another through loopback
+    inside the worker namespace. Only the bind address is widened so the root
+    guardian and HAProxy can certify and route to the worker namespace address.
+    """
+
+    return ["-ip.bind=0.0.0.0" if argument == "-ip.bind=127.0.0.1" else argument for argument in command]
+
+
 class LocalWriterLease:
     """Exclusive ownership of one appliance state directory.
 
@@ -221,7 +232,7 @@ class WorkerGeneration:
             if uid is None or gid is None:
                 raise GenerationError("worker uid and gid must be supplied together")
             wrapped.extend(["setpriv", f"--reuid={uid}", f"--regid={gid}", "--clear-groups", "--"])
-        wrapped.extend(command)
+        wrapped.extend(namespace_visible_command(command))
         return wrapped
 
     def fence(self, reason: str) -> None:
