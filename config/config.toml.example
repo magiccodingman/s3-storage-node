@@ -14,16 +14,12 @@ recovery_max_seconds = 60
 recovery_stability_seconds = 15
 recovery_probe_interval_seconds = 2
 recovery_successes_required = 3
-
-# Run each SeaweedFS generation and its managed storage mount inside isolated
-# mount/network namespaces. Exclusive transport failover requires this mode.
 worker_fencing_mode = "namespace"
 worker_host_address = "169.254.254.1/30"
 worker_address = "169.254.254.2/30"
 worker_gateway = "169.254.254.1"
 s3_canary_enabled = true
 
-# The canonical/preferred bulk SeaweedFS .dat transport.
 [storage.data]
 type = "cifs"
 source = "//u123456.your-storagebox.de/backup"
@@ -39,24 +35,12 @@ minimum_smb_dialect = "3.1.1"
 multichannel_policy = "disabled"
 require_transport_observability = false
 mount_options = [
-  "vers=3.1.1",
-  "uid=10001",
-  "gid=10001",
-  "forceuid",
-  "forcegid",
-  "file_mode=0660",
-  "dir_mode=0770",
-  "noperm",
-  "noserverino",
-  "iocharset=utf8",
-  "echo_interval=15",
-  "actimeo=1"
+  "vers=3.1.1", "uid=10001", "gid=10001", "forceuid", "forcegid",
+  "file_mode=0660", "dir_mode=0770", "noperm", "noserverino",
+  "iocharset=utf8", "echo_interval=15", "actimeo=1"
 ]
 
-# Optional exclusive fallback to the same dataset through SFTP/SSHFS. The
-# fallback is sticky: the guardian does not automatically fail back to CIFS.
-# Run Compose with docker-compose.sshfs.yml so /dev/fuse and these secrets are
-# available before enabling this table.
+# Optional exclusive fallback to the same dataset through SFTP/SSHFS.
 [storage.data.failover]
 enabled = false
 primary_name = "cifs-primary"
@@ -64,17 +48,37 @@ primary_priority = 10
 failback_policy = "manual"
 failure_cooldown_seconds = 60
 
+# Verify every configured route before first use and whenever its transport
+# settings, credentials, private key, or known-hosts file changes. Set false
+# when an intentionally offline alternate must not block startup. The selected
+# serving route is always fully certified regardless of this setting.
+verify_all_transports_on_startup = true
+
+# Password authentication. When credentials_file is omitted, this route reuses
+# storage.data.credentials_file. Hetzner Storage Box SMB and SSH/SFTP accounts
+# can therefore share the existing cifs_credentials secret.
 [[storage.data.failover.transports]]
-name = "sshfs-secondary"
+name = "sshfs-password"
 type = "sshfs"
 priority = 20
 source = "u123456@u123456.your-storagebox.de:/home"
-identity_file = "/run/secrets/ssh_identity"
+auth_mode = "password"
 known_hosts_file = "/run/secrets/ssh_known_hosts"
 port = 23
 mount_options = []
 
-# Local persistent filer metadata. This can instead be another cifs/block/path target.
+# Key authentication is also supported. Ordinarily configure one SSHFS route.
+# [[storage.data.failover.transports]]
+# name = "sshfs-key"
+# type = "sshfs"
+# priority = 30
+# source = "u123456@u123456.your-storagebox.de:/home"
+# auth_mode = "key"
+# identity_file = "/run/secrets/ssh_identity"
+# known_hosts_file = "/run/secrets/ssh_known_hosts"
+# port = 23
+# mount_options = []
+
 [storage.metadata]
 type = "path"
 mountpoint = "/var/lib/s3-storage-node/metadata"
@@ -83,7 +87,6 @@ sentinel_id = "metadata-local-01"
 allow_initialize = true
 min_free_bytes = 1073741824
 
-# Fast volume indexes. This can instead point to data if separation is not desired.
 [storage.index]
 type = "path"
 mountpoint = "/var/lib/s3-storage-node/index"
