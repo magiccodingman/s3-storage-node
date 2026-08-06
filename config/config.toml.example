@@ -134,3 +134,14 @@ access_key_file = "/run/secrets/s3_access_key"
 secret_key_file = "/run/secrets/s3_secret_key"
 tls_mode = "off"
 tls_pem_file = ""
+
+# Aggregate admission budget shared by reads, writes, lists, and metadata calls.
+# The shared ceiling prevents mixed traffic from bypassing the storage safety cap.
+# Requests above max_active_requests wait in HAProxy until a slot opens. Once the
+# bounded queue is full, or a request waits longer than queue_timeout_seconds,
+# HAProxy returns a retryable HTTP 503 without marking the storage transport failed.
+[s3.admission]
+enabled = true
+max_active_requests = 32
+max_queued_requests = 128
+queue_timeout_seconds = 30
