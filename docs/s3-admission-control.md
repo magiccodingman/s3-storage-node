@@ -2,7 +2,7 @@
 
 S3 Storage Node places HAProxy in front of the SeaweedFS S3 gateway. The admission controller uses that existing boundary to prevent a burst of client requests from driving more concurrent work into SeaweedFS than the storage path can safely sustain.
 
-Admission control is enabled by default:
+The complete sample is available in `config/config.toml.example`. Admission control is enabled by default:
 
 ```toml
 [s3.admission]
