@@ -7,7 +7,16 @@ from pathlib import Path
 
 from .config_helpers import ConfigError, _bool, _int, _positive, _relative_path, _string, _string_list, _table
 from .config_target import _parse_target
-from .config_types import ApplianceConfig, Config, IndexConfig, MetadataConfig, S3Config, SeaweedConfig, TargetConfig
+from .config_types import (
+    ApplianceConfig,
+    Config,
+    IndexConfig,
+    MetadataConfig,
+    S3AdmissionConfig,
+    S3Config,
+    SeaweedConfig,
+    TargetConfig,
+)
 
 
 def load_config(path: str | os.PathLike[str]) -> Config:
@@ -177,6 +186,30 @@ def load_config(path: str | os.PathLike[str]) -> Config:
     tls_mode = _string(s3_raw.get("tls_mode"), "s3.tls_mode", "off").lower()
     if tls_mode not in {"off", "terminate"}:
         raise ConfigError("s3.tls_mode must be off or terminate")
+
+    admission_raw = _table(s3_raw, "admission")
+    admission = S3AdmissionConfig(
+        enabled=_bool(admission_raw.get("enabled"), "s3.admission.enabled", True),
+        max_active_requests=_int(
+            admission_raw.get("max_active_requests"),
+            "s3.admission.max_active_requests",
+            32,
+        ),
+        max_queued_requests=_int(
+            admission_raw.get("max_queued_requests"),
+            "s3.admission.max_queued_requests",
+            128,
+        ),
+        queue_timeout_seconds=_int(
+            admission_raw.get("queue_timeout_seconds"),
+            "s3.admission.queue_timeout_seconds",
+            30,
+        ),
+    )
+    _positive(admission.max_active_requests, "s3.admission.max_active_requests")
+    _positive(admission.max_queued_requests, "s3.admission.max_queued_requests")
+    _positive(admission.queue_timeout_seconds, "s3.admission.queue_timeout_seconds")
+
     s3 = S3Config(
         host=_string(s3_raw.get("host"), "s3.host", "0.0.0.0"),
         port=_int(s3_raw.get("port"), "s3.port", 8333),
@@ -193,6 +226,7 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         audit_log_config_file=_string(s3_raw.get("audit_log_config_file"), "s3.audit_log_config_file", ""),
         tls_mode=tls_mode,
         tls_pem_file=_string(s3_raw.get("tls_pem_file"), "s3.tls_pem_file", ""),
+        admission=admission,
     )
     _positive(s3.port, "s3.port")
     if s3.port < 1024:

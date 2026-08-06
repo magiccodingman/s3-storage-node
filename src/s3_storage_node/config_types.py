@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import ipaddress
 from pathlib import Path
 
@@ -115,6 +115,14 @@ class SeaweedConfig:
 
 
 @dataclass(frozen=True)
+class S3AdmissionConfig:
+    enabled: bool = True
+    max_active_requests: int = 32
+    max_queued_requests: int = 128
+    queue_timeout_seconds: int = 30
+
+
+@dataclass(frozen=True)
 class S3Config:
     host: str = "0.0.0.0"
     port: int = 8333
@@ -131,6 +139,7 @@ class S3Config:
     audit_log_config_file: str = ""
     tls_mode: str = "off"
     tls_pem_file: str = ""
+    admission: S3AdmissionConfig = field(default_factory=S3AdmissionConfig)
 
 
 @dataclass(frozen=True)
