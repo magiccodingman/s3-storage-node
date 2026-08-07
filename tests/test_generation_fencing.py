@@ -127,7 +127,13 @@ def test_lingering_process_still_blocks_replacement_generation(tmp_path: Path) -
 def test_haproxy_routes_to_worker_namespace_but_checks_root_health(tmp_path: Path) -> None:
     config = SimpleNamespace(
         appliance=SimpleNamespace(runtime_dir=tmp_path, health_host="0.0.0.0", health_port=9090),
-        s3=SimpleNamespace(host="0.0.0.0", port=8333, tls_mode="off", tls_pem_file=""),
+        s3=SimpleNamespace(
+            host="0.0.0.0",
+            port=8333,
+            tls_mode="off",
+            tls_pem_file="",
+            admission=SimpleNamespace(enabled=False),
+        ),
         seaweed=SimpleNamespace(s3_internal_port=18333),
         worker_endpoint_host="169.254.254.2",
     )
@@ -140,7 +146,13 @@ def test_haproxy_routes_to_worker_namespace_but_checks_root_health(tmp_path: Pat
 def test_haproxy_respects_explicit_root_health_address(tmp_path: Path) -> None:
     config = SimpleNamespace(
         appliance=SimpleNamespace(runtime_dir=tmp_path, health_host="127.0.0.2", health_port=9090),
-        s3=SimpleNamespace(host="0.0.0.0", port=8333, tls_mode="off", tls_pem_file=""),
+        s3=SimpleNamespace(
+            host="0.0.0.0",
+            port=8333,
+            tls_mode="off",
+            tls_pem_file="",
+            admission=SimpleNamespace(enabled=False),
+        ),
         seaweed=SimpleNamespace(s3_internal_port=18333),
         worker_endpoint_host="169.254.254.2",
     )
