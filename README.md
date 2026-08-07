@@ -72,7 +72,7 @@ SSHFS is recovery-only. The canonical data target remains CIFS, namespace fencin
 - `CAP_SYS_ADMIN` for appliance-managed mounts and namespace entry
 - `CAP_NET_ADMIN` for worker-generation veth fencing
 - AppArmor allowance for mounting; the supplied Compose configuration uses `apparmor=unconfined`
-- `/dev/fuse` plus `docker-compose.sshfs.yml` when SSHFS recovery is enabled
+- A usable host `/dev/fuse`; the standard Compose file maps it so SSHFS recovery requires no overlay
 - An already formatted filesystem and explicit Docker device mapping for block devices
 
 The image includes SeaweedFS, `mount.cifs`, SSHFS, HAProxy, filesystem tools, and the guardian, and is published for `linux/amd64` and `linux/arm64`.
@@ -89,8 +89,11 @@ cp config/config.toml.example config/config.toml
 cp secrets/cifs-credentials.example secrets/cifs-credentials
 cp secrets/s3-access-key.example secrets/s3-access-key
 cp secrets/s3-secret-key.example secrets/s3-secret-key
+touch secrets/ssh-identity secrets/ssh-known-hosts
 chmod 600 secrets/*
 ```
+
+The standard Compose file declares both SSH secret paths so every deployment uses one command. CIFS-only deployments may leave `secrets/ssh-identity` and `secrets/ssh-known-hosts` empty; the guardian reads them only when an SSHFS recovery route is configured.
 
 CIFS credentials use `mount.cifs` format:
 
@@ -195,11 +198,20 @@ port = 23
 mount_options = []
 ```
 
-Start with the SSHFS Compose overlay so `/dev/fuse` and the SSH secrets are available:
+Populate the pinned host-key file and, for key authentication, the private key:
+
+```text
+secrets/ssh-known-hosts
+secrets/ssh-identity
+```
+
+The base Compose file already maps `/dev/fuse` and both secret paths. Start the node normally:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.sshfs.yml up -d
+docker compose up -d
 ```
+
+Password-authenticated SSHFS may reuse `secrets/cifs-credentials` and does not need a populated private-key file. See [Exclusive CIFS-to-SSHFS failover](docs/exclusive-transport-failover.md) for both authentication modes.
 
 Inspect persisted selection and failure state:
 
@@ -218,7 +230,7 @@ docker compose exec s3-storage-node \
   --transport cifs-primary
 ```
 
-Restoring CIFS does not cause automatic failback. See [Exclusive CIFS-to-SSHFS failover](docs/exclusive-transport-failover.md).
+Restoring CIFS does not cause automatic failback.
 
 ## Failure and recovery behavior
 
@@ -289,7 +301,7 @@ Cross-node or cross-location redundancy belongs to a higher-level replication, o
 
 ## Security note
 
-Mounting filesystems inside a container requires meaningful privilege. The supplied Compose configuration grants `CAP_SYS_ADMIN` and `CAP_NET_ADMIN`, relaxes AppArmor for mount operations, and optionally exposes `/dev/fuse`. It does not mount the Docker socket, host root filesystem, host PID namespace, or host network namespace. SeaweedFS and HAProxy run as UID/GID `10001`; the guardian alone performs privileged lifecycle work.
+Mounting filesystems inside a container requires meaningful privilege. The supplied Compose configuration grants `CAP_SYS_ADMIN` and `CAP_NET_ADMIN`, relaxes AppArmor for mount operations, and exposes `/dev/fuse`. It does not mount the Docker socket, host root filesystem, host PID namespace, or host network namespace. SeaweedFS and HAProxy run as UID/GID `10001`; the guardian alone performs privileged lifecycle work.
 
 Protect configuration, CIFS credentials, SSH private keys, trusted host keys, S3 credentials, block devices, `/dev/fuse`, persistent state, and the detailed health endpoint.
 
@@ -302,6 +314,7 @@ Protect configuration, CIFS credentials, SSH private keys, trusted host keys, S3
 - [Operations and recovery](docs/operations.md)
 - [Worker-generation fencing](docs/worker-generation-fencing.md)
 - [Exclusive CIFS-to-SSHFS failover](docs/exclusive-transport-failover.md)
+- [Bounded S3 admission control](docs/s3-admission-control.md)
 - [Security model](docs/security.md)
 - [Release workflow](docs/releasing.md)
 

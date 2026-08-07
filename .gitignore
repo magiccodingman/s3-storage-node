@@ -6,3 +6,5 @@ config/config.toml
 secrets/cifs-credentials
 secrets/s3-access-key
 secrets/s3-secret-key
+secrets/ssh-identity
+secrets/ssh-known-hosts

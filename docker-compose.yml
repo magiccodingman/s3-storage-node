@@ -12,6 +12,8 @@ services:
       - DAC_READ_SEARCH
     security_opt:
       - apparmor=unconfined
+    devices:
+      - /dev/fuse:/dev/fuse
     read_only: true
     tmpfs:
       - /run:size=128m,mode=0755
@@ -26,6 +28,8 @@ services:
       - cifs_credentials
       - s3_access_key
       - s3_secret_key
+      - ssh_identity
+      - ssh_known_hosts
     stop_grace_period: 45s
 
 volumes:
@@ -38,3 +42,7 @@ secrets:
     file: ./secrets/s3-access-key
   s3_secret_key:
     file: ./secrets/s3-secret-key
+  ssh_identity:
+    file: ./secrets/ssh-identity
+  ssh_known_hosts:
+    file: ./secrets/ssh-known-hosts
