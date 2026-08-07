@@ -92,38 +92,33 @@ Startup-verification failures are attributed to the route actually being tested 
 
 ## Docker
 
-SSHFS requires `/dev/fuse` and namespace fencing requires the existing `SYS_ADMIN` and `NET_ADMIN` capabilities.
-
-Password mode reusing CIFS credentials needs only the host-key secret in addition to the base deployment:
+The standard `docker-compose.yml` includes `/dev/fuse` and both SSH secret mounts, so CIFS-only, SSHFS password, and SSHFS key deployments all use the same command:
 
 ```bash
-docker compose \
-  -f docker-compose.yml \
-  -f docker-compose.sshfs-password.yml \
-  up -d
+docker compose up -d
 ```
 
-Files:
+Create the SSH secret files before the first Compose start. CIFS-only deployments may leave them empty because the guardian reads them only when an SSHFS route is configured:
+
+```bash
+touch secrets/ssh-identity secrets/ssh-known-hosts
+chmod 600 secrets/ssh-identity secrets/ssh-known-hosts
+```
+
+Password mode reusing CIFS credentials requires a populated pinned host-key file:
 
 ```text
 secrets/cifs-credentials
 secrets/ssh-known-hosts
 ```
 
-Key mode uses:
-
-```bash
-docker compose \
-  -f docker-compose.yml \
-  -f docker-compose.sshfs.yml \
-  up -d
-```
-
-and additionally requires:
+Key mode additionally requires:
 
 ```text
 secrets/ssh-identity
 ```
+
+SSHFS requires a usable host `/dev/fuse`. Namespace fencing continues to use the `SYS_ADMIN` and `NET_ADMIN` capabilities already granted by the standard Compose file.
 
 ## Selection and failback
 
