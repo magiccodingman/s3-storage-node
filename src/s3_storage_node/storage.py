@@ -252,6 +252,23 @@ def mount_target(target: TargetConfig) -> None:
         raise StorageError(f"unsupported storage type: {target.type}")
 
 
+def _wait_unmounted(mountpoint: Path, timeout_seconds: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if find_mount(mountpoint) is None:
+            return True
+        time.sleep(0.05)
+    return find_mount(mountpoint) is None
+
+
+def _unmount_command(command: list[str]) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(command, text=True, capture_output=True, timeout=15, check=False)
+    except subprocess.TimeoutExpired:
+        return False, f"timed out running {' '.join(command)}"
+    return result.returncode == 0, result.stderr.strip() or result.stdout.strip()
+
+
 def unmount_target(target: TargetConfig) -> None:
     if target.type == "path":
         return
@@ -260,21 +277,36 @@ def unmount_target(target: TargetConfig) -> None:
             _stop_sshfs_process(target)
         prepare_barrier(target)
         return
-    if target.type == "sshfs":
-        result = subprocess.run(
-            ["fusermount3", "-u", "-z", str(target.mountpoint)], text=True,
-            capture_output=True, timeout=15, check=False,
-        )
-        if result.returncode == 0:
-            _stop_sshfs_process(target)
-            prepare_barrier(target)
-            return
-    result = subprocess.run(
-        ["umount", "-l", str(target.mountpoint)], text=True,
-        capture_output=True, timeout=15, check=False,
+    errors: list[str] = []
+    clean_command = (
+        ["fusermount3", "-u", str(target.mountpoint)]
+        if target.type == "sshfs"
+        else ["umount", str(target.mountpoint)]
     )
-    if result.returncode != 0:
-        raise StorageError(result.stderr.strip() or f"failed to unmount {target.mountpoint}")
+    clean, detail = _unmount_command(clean_command)
+    if clean and _wait_unmounted(target.mountpoint):
+        if target.type == "sshfs":
+            _stop_sshfs_process(target)
+        prepare_barrier(target)
+        return
+    if detail:
+        errors.append(detail)
+
+    lazy_commands = []
+    if target.type == "sshfs":
+        lazy_commands.append(["fusermount3", "-u", "-z", str(target.mountpoint)])
+    lazy_commands.append(["umount", "-l", str(target.mountpoint)])
+    detached = False
+    for command in lazy_commands:
+        succeeded, detail = _unmount_command(command)
+        if succeeded and _wait_unmounted(target.mountpoint):
+            detached = True
+            break
+        if detail:
+            errors.append(detail)
+    if not detached:
+        message = "; ".join(errors) or f"failed to unmount {target.mountpoint}"
+        raise StorageError(message)
     if target.type == "sshfs":
         _stop_sshfs_process(target)
     prepare_barrier(target)

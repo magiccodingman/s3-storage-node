@@ -1,6 +1,6 @@
 # Exclusive CIFS-to-SSHFS transport failover
 
-The data target can expose one logical dataset through a preferred CIFS route and one or more exclusive SSHFS recovery routes. This is generation-level failover, not per-I/O switching. Exactly one route is writable at a time, and every replacement generation is physically network-fenced from the old one first.
+The data target can expose one logical dataset through a preferred CIFS route and one or more exclusive SSHFS recovery routes. This is generation-level failover, not per-I/O switching. Exactly one route is writable at a time, and every replacement generation starts only after the old one cleanly detached or was physically network-fenced.
 
 ## Authentication choices
 
@@ -122,7 +122,7 @@ SSHFS requires a usable host `/dev/fuse`. Namespace fencing continues to use the
 
 ## Selection and failback
 
-The lowest-priority-number eligible route is selected initially. A transport mount, authentication, sentinel, or durability failure withdraws readiness, fences the generation, records that route as failed, and allows the next eligible route after recovery backoff. Generic SeaweedFS or HAProxy failures do not condemn a transport.
+The lowest-priority-number eligible route is selected initially. A transport mount, authentication, sentinel, or durability failure withdraws readiness, attempts a bounded SeaweedFS drain, physically fences the generation after clean detach or on drain failure, records that route as failed, and allows the next eligible route after recovery backoff. Generic SeaweedFS or HAProxy failures do not condemn a transport.
 
 Fallback is sticky. Recovery of CIFS does not automatically move a healthy SSHFS generation back. Request controlled failback with:
 

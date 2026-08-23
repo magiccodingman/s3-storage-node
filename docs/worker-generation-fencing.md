@@ -62,21 +62,20 @@ A normal generation lifecycle is:
 7. HAProxy reaches SeaweedFS through the stable worker address while checking readiness in the appliance namespace.
 8. The generation becomes public only after full storage and S3 recovery certification.
 
-Generation ID, token identifier, namespace PID, worker address, selected transport, fence state, and local writer-lock state are exposed through health JSON and Prometheus metrics.
+Generation ID, token identifier, namespace PID, worker address, selected transport, fence state, and local writer-lock state are exposed through health JSON and Prometheus metrics. A bounded durable journal records the last 64 outcomes and counters by cause; the monotonic generation ID remains an identity, not an error signal.
 
-## Unexpected failure: fence first
+## Unexpected failure: bounded drain, hard-fence fallback
 
 An unexpected storage, process, or health failure follows:
 
 1. withdraw readiness;
-2. delete the root veth;
-3. mark the generation fenced;
-4. attempt SeaweedFS shutdown;
-5. detach managed storage;
-6. retire the namespace only when safe;
-7. create a replacement generation after backoff and full certification.
+2. stop the S3 gateway and then SeaweedFS in reverse dependency order under one global deadline;
+3. verify that the volume writer exited;
+4. attempt a clean managed-storage detach;
+5. physically fence and retire the drained generation;
+6. create a replacement generation after backoff and full certification.
 
-The old transport is untrusted, so network fencing must precede attempts to drain or detach it.
+If shutdown, detach, or the global deadline fails, the guardian deletes the root veth immediately, verifies the physical fence, records an unclean outcome, and treats local indexes as suspect. It then attempts best-effort mount cleanup. A replacement still cannot start while a prior process or helper remains alive.
 
 If the physical fence cannot be verified, the guardian enters a fatal fence-failure state and does not create a replacement.
 

@@ -209,3 +209,22 @@ auth_mode = "none"
     )
     with pytest.raises(ConfigError, match="1024 or greater"):
         load_config(config_path)
+
+
+def test_expected_readonly_volume_ids_are_explicit_upstream_exceptions(tmp_path: Path) -> None:
+    text = BASE.format(
+        state=tmp_path / "state", runtime=tmp_path / "runtime",
+        data=tmp_path / "state/data", meta=tmp_path / "state/meta", index=tmp_path / "state/index",
+    ).replace("[seaweed]", "[seaweed]\nexpected_readonly_volume_ids = [23, 64]")
+    config = load_config(write_config(tmp_path, text))
+    assert config.seaweed.expected_readonly_volume_ids == (23, 64)
+
+
+@pytest.mark.parametrize("value", ["[0]", "[23, 23]", '["23"]'])
+def test_expected_readonly_volume_ids_are_validated(tmp_path: Path, value: str) -> None:
+    text = BASE.format(
+        state=tmp_path / "state", runtime=tmp_path / "runtime",
+        data=tmp_path / "state/data", meta=tmp_path / "state/meta", index=tmp_path / "state/index",
+    ).replace("[seaweed]", f"[seaweed]\nexpected_readonly_volume_ids = {value}")
+    with pytest.raises(ConfigError, match="expected_readonly_volume_ids"):
+        load_config(write_config(tmp_path, text))

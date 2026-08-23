@@ -15,10 +15,10 @@ S3 Storage Node gives that storage an explicit safety boundary.
 - **A failed target withdraws the entire endpoint.** HAProxy returns `503` as soon as readiness is withdrawn. The SeaweedFS master, volume server, filer, and S3 gateway are treated as one guarded unit.
 - **Blocking storage work cannot trap the guardian.** Mount, unmount, enrollment, layout, and probe operations run in disposable child processes with hard deadlines.
 - **Worker generations are physically fenced.** In namespace mode, every SeaweedFS generation has private mount and network namespaces. Deleting its root veth removes its route to remote storage before replacement.
-- **Recovery requires end-to-end proof.** Storage identity, capacity, durable write/read/delete probes, SeaweedFS startup, authenticated S3 canaries, and a stability window must all pass before traffic reopens.
+- **Recovery requires end-to-end proof.** Storage identity, capacity, durable write/read/delete probes, upstream SeaweedFS volume status, authenticated S3 canaries, and a stability window must all pass before traffic reopens.
 - **CIFS may have an exclusive SSHFS recovery route.** Only one transport is selected for a generation. CIFS and SSHFS are never mounted as simultaneous writers and represent one storage failure domain, not two replicas.
 - **Metadata and indexes may be separated.** Bulk `.dat` files can live remotely while filer metadata and `.idx` files remain on fast persistent local storage.
-- **Health is observable.** JSON logs, readiness/liveness endpoints, Prometheus metrics, generation state, selected transport, probe results, capacity, failures, and recoveries are exposed.
+- **Health is observable.** JSON logs, readiness/liveness endpoints, Prometheus metrics, bounded generation outcomes and causes, index trust, SeaweedFS read-only volumes, selected transport, probe results, capacity, failures, and recoveries are exposed.
 
 This does not make a remote filesystem equivalent to an enterprise local disk array. It makes failure explicit and prevents the node from claiming success while its guarded storage path is unsafe.
 
@@ -237,14 +237,14 @@ Restoring CIFS does not cause automatic failback.
 ### Unexpected storage or process failure
 
 1. Readiness changes to `503` and HAProxy withdraws the backend.
-2. The active worker generation is physically network-fenced.
-3. SeaweedFS shutdown is attempted in reverse dependency order.
-4. Managed mounts are detached and the old generation is retired only when safe.
+2. SeaweedFS shutdown is attempted in reverse dependency order under one global deadline.
+3. If writers exit, the active storage route is cleanly detached before physical fencing.
+4. If drain or detach fails, the worker is hard-fenced immediately and its indexes are marked suspect.
 5. A failed transport is persisted and the next eligible exclusive transport is selected after recovery backoff.
-6. Storage identity, capacity, full durability probes, SeaweedFS startup, S3 canaries, and the recovery stability window must pass.
+6. Storage identity, capacity, full durability probes, SeaweedFS volume status, S3 canaries, and the recovery stability window must pass.
 7. Readiness returns to `200` and HAProxy reopens traffic.
 
-The fault path is deliberately fence-first because the storage path is no longer trusted.
+Readiness always closes immediately. The physical fence remains mandatory before replacement, while a bounded drain avoids cutting the remote data path before SeaweedFS has had a chance to finish shutdown.
 
 ### Controlled operator transport switch
 
@@ -288,7 +288,7 @@ Any active target failure withdraws the entire endpoint. To use PostgreSQL for f
 |---|---|
 | `GET :9090/live` | Guardian process is running |
 | `GET :9090/ready` | Node is certified safe to receive S3 traffic |
-| `GET :9090/healthz` | Detailed appliance, generation, storage, sentinel, and transport state |
+| `GET :9090/healthz` | Detailed appliance, generation history, index trust, SeaweedFS volumes, storage, sentinel, and transport state |
 | `GET :9090/metrics` | Prometheus metrics |
 
 The public endpoint is gated by guardian readiness, not merely by whether SeaweedFS has opened a socket.
