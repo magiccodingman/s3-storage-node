@@ -14,7 +14,7 @@ from .logging import event
 from .processes import ManagedProcess, ProcessError, wait_for_tcp
 from .render import render_filer_toml, render_haproxy, render_s3_config
 from .s3check import run_canary
-from .seaweed_health import UnexpectedReadonlyVolumes, inspect_volume_status
+from .seaweed_health import SeaweedHealthError, UnexpectedReadonlyVolumes, inspect_volume_status
 from .storage import StorageError, prepare_barrier
 
 
@@ -283,9 +283,9 @@ class Guardian:
             wait_for_tcp("127.0.0.1", port, self.config.appliance.startup_timeout_seconds, process)
         if self.config.appliance.s3_canary_enabled:
             self._run_s3_canary()
-        self._check_seaweed_volumes()
+        self._wait_for_stable_seaweed_volumes()
 
-    def _check_seaweed_volumes(self) -> dict[str, object]:
+    def _inspect_seaweed_volumes(self) -> dict[str, object]:
         if not getattr(self.config.seaweed, "volume_health_enabled", False):
             return {}
         result = inspect_volume_status(
@@ -295,10 +295,103 @@ class Guardian:
             timeout_seconds=self.config.appliance.probe_timeout_seconds,
         )
         self.health.set_seaweed_volumes(result)
+        return result
+
+    def _accept_seaweed_volume_status(self, result: dict[str, object]) -> dict[str, object]:
+        if not result:
+            return result
         unexpected = result["unexpected_readonly_volume_ids"]
         if unexpected:
             raise UnexpectedReadonlyVolumes(result)
         return result
+
+    def _check_seaweed_volumes(self) -> dict[str, object]:
+        return self._accept_seaweed_volume_status(self._inspect_seaweed_volumes())
+
+    @staticmethod
+    def _seaweed_volume_status_signature(result: dict[str, object]) -> tuple[object, ...]:
+        details = result.get("volume_details", [])
+        if isinstance(details, list) and (details or result.get("total") == 0):
+            return tuple(
+                (
+                    volume.get("id"),
+                    volume.get("collection"),
+                    volume.get("readonly"),
+                    volume.get("expected_readonly"),
+                )
+                for volume in details
+                if isinstance(volume, dict)
+            )
+        return (
+            result.get("total"),
+            tuple(result.get("readonly_volume_ids", [])),
+            tuple(result.get("unexpected_readonly_volume_ids", [])),
+        )
+
+    def _wait_for_stable_seaweed_volumes(self) -> dict[str, object]:
+        if not getattr(self.config.seaweed, "volume_health_enabled", False):
+            return {}
+
+        stability_seconds = getattr(self.config.appliance, "recovery_stability_seconds", 15)
+        probe_interval = getattr(self.config.appliance, "recovery_probe_interval_seconds", 2)
+        required_successes = getattr(self.config.appliance, "recovery_successes_required", 3)
+        timeout_seconds = max(
+            getattr(self.config.appliance, "startup_timeout_seconds", 30),
+            stability_seconds + (probe_interval * required_successes),
+        )
+        deadline = time.monotonic() + timeout_seconds
+        stable_since = 0.0
+        successes = 0
+        signature: tuple[object, ...] | None = None
+        result: dict[str, object] = {}
+        self.health.set(
+            "VERIFYING_SEAWEED_STATUS",
+            False,
+            "waiting for the upstream SeaweedFS volume status to stabilize",
+        )
+
+        while not self.stopping:
+            try:
+                result = self._inspect_seaweed_volumes()
+            except SeaweedHealthError as exc:
+                signature = None
+                stable_since = 0.0
+                successes = 0
+                event("warning", "seaweed_volume_status_probe_failed", error=str(exc))
+            else:
+                now = time.monotonic()
+                current_signature = self._seaweed_volume_status_signature(result)
+                if current_signature != signature:
+                    signature = current_signature
+                    stable_since = now
+                    successes = 1
+                    event(
+                        "info",
+                        "seaweed_volume_status_changed_during_startup",
+                        total=result.get("total", 0),
+                        unexpected_readonly_volume_ids=result.get("unexpected_readonly_volume_ids", []),
+                    )
+                else:
+                    successes += 1
+                elapsed = now - stable_since
+                if successes >= required_successes and elapsed >= stability_seconds:
+                    event(
+                        "info",
+                        "seaweed_volume_status_stable",
+                        seconds=elapsed,
+                        consecutive_samples=successes,
+                        total=result.get("total", 0),
+                        unexpected_readonly_volume_ids=result.get("unexpected_readonly_volume_ids", []),
+                    )
+                    return self._accept_seaweed_volume_status(result)
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SeaweedHealthError(
+                    f"SeaweedFS volume status did not stabilize within {timeout_seconds} seconds"
+                )
+            self._interruptible_sleep(min(probe_interval, remaining))
+        raise KeyboardInterrupt
 
     def _stabilize_recovery(self) -> None:
         stability_seconds = getattr(self.config.appliance, "recovery_stability_seconds", 15)

@@ -374,9 +374,9 @@ class Guardian(BaseGuardian):
             external_url=self.config.s3.external_url,
         )
 
-    def _check_seaweed_volumes(self) -> dict[str, object]:
+    def _accept_seaweed_volume_status(self, result: dict[str, object]) -> dict[str, object]:
         try:
-            result = super()._check_seaweed_volumes()
+            result = super()._accept_seaweed_volume_status(result)
         except UnexpectedReadonlyVolumes as exc:
             if self.index_repair is not None and self.index_repair.has_awaiting_validation():
                 raise IndexValidationRequired(exc.status) from exc
@@ -482,7 +482,7 @@ class Guardian(BaseGuardian):
         for process, port in zip(self.processes, ports, strict=True):
             process.start()
             wait_for_tcp(self._worker_endpoint_host(), port, self.config.appliance.startup_timeout_seconds, process)
-        self._check_seaweed_volumes()
+        self._wait_for_stable_seaweed_volumes()
         if self.config.appliance.s3_canary_enabled:
             self._run_s3_canary()
 
