@@ -168,6 +168,34 @@ ONLINE
   → ONLINE
 ```
 
+An unexpected upstream read-only index follows a separate offline transaction:
+
+```text
+STARTING_SEAWEED / readiness withdrawn
+  → upstream /status identifies unexpected ReadOnly volume IDs and collections
+  → REPAIRING_INDEXES
+  → S3, filer, volume server, and master stop in reverse dependency order
+  → every writer is verified gone
+  → selected .dat is exposed read-only in a disposable mount namespace
+  → weed fix builds a local candidate as the SeaweedFS UID/GID
+  → original .idx and .sdx are backed up
+  → candidate .idx is atomically installed and stale .sdx removed
+  → STARTING_SEAWEED
+  → upstream /status accepts each candidate, or the rejected volume is rolled back
+  → durability probes, authenticated S3 canary, and stability window
+  → ONLINE
+```
+
+Repair is never a periodic live-volume operation. Detection uses SeaweedFS's own `ReadOnly` result, and only the reported unexpected IDs are considered. Explicit `expected_readonly_volume_ids` remain untouched.
+
+The remote `.dat` is authoritative. A repair helper enters a nested private mount namespace, bind-mounts only the selected `.dat`, remounts it `ro,nosuid,nodev,noexec`, and projects it through a read-only permission-masking FUSE view. This last layer is necessary because SeaweedFS 4.44 chooses its open mode from Unix permission bits; it lets `weed fix` see a non-writable file without changing the source mode. A final individual read-only bind is inspected with `findmnt`, and an unprivileged write attempt must fail before the bundled `weed` binary runs. The writable staging directory is local and contains only reconstructed derived state.
+
+This authority choice follows the appliance's persistence split: remote `.dat` appends contain the volume records, while local `.idx` and `.sdx` files are reconstructible acceleration state. A hard fence can interrupt an in-flight remote append after a local index update survives, or preserve the data append before its index update. Graceful draining reduces that window but cannot remove it when a transport or process is genuinely wedged.
+
+Each volume has an atomic, fsynced journal beneath `<index path>/.s3-storage-node-repair`. It records source identity and bounded hashes, generation and transport, old/candidate artifacts, attempts, phase history, backups, validation, rollback, and failures. Candidate and backup artifacts share the live index filesystem. Installation is write-ahead journaled and reconciled by recorded hashes after a crash; an ambiguous live artifact fails closed. Backups are retained indefinitely in the first implementation.
+
+SeaweedFS `/status` is the final candidate authority. A repaired ID must still be present and explicitly writable; absence is rejection, not success. Rejected candidates are rolled back after writers stop again and their identical source fingerprint is blocked from automatic retry. Successful volumes in a batch remain repaired when another volume fails.
+
 Configuration, identity, fence, lingering-process, or blocked-helper failures leave the endpoint unavailable and are repeatedly reported. Unknown storage is never initialized unless `allow_initialize` is explicitly enabled.
 
 ## Persistence domains
@@ -184,7 +212,7 @@ configured metadata target
     embedded filer database, unless PostgreSQL/custom is selected
 
 configured index target
-    SeaweedFS volume indexes
+    SeaweedFS volume indexes and persistent repair journals/backups
 
 selected data transport
     SeaweedFS volume data and dataset sentinel

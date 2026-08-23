@@ -10,6 +10,18 @@ class SeaweedHealthError(RuntimeError):
     pass
 
 
+class UnexpectedReadonlyVolumes(SeaweedHealthError):
+    """Upstream reported volumes that are not operator-certified read-only."""
+
+    def __init__(self, status: dict[str, Any]) -> None:
+        self.status = status
+        unexpected = status.get("unexpected_readonly_volume_ids", [])
+        super().__init__(
+            "SeaweedFS reported unexpected read-only volumes: "
+            + ",".join(str(volume_id) for volume_id in unexpected)
+        )
+
+
 def parse_volume_status(payload: object, expected_readonly_ids: set[int]) -> dict[str, Any]:
     if not isinstance(payload, dict) or "Volumes" not in payload:
         raise SeaweedHealthError("SeaweedFS volume status did not contain a Volumes array")
@@ -21,6 +33,7 @@ def parse_volume_status(payload: object, expected_readonly_ids: set[int]) -> dic
 
     readonly_ids: list[int] = []
     unexpected_ids: list[int] = []
+    volume_details: list[dict[str, Any]] = []
     collections: dict[str, dict[str, int]] = {}
     total = 0
     writable = 0
@@ -34,8 +47,9 @@ def parse_volume_status(payload: object, expected_readonly_ids: set[int]) -> dic
         readonly = raw.get("ReadOnly")
         if not isinstance(readonly, bool):
             raise SeaweedHealthError(f"SeaweedFS volume {volume_id} did not report a boolean ReadOnly state")
-        collection = str(raw.get("Collection") or "<default>")
-        counts = collections.setdefault(collection, {"total": 0, "readonly": 0, "writable": 0})
+        raw_collection = str(raw.get("Collection") or "")
+        collection_label = raw_collection or "<default>"
+        counts = collections.setdefault(collection_label, {"total": 0, "readonly": 0, "writable": 0})
         counts["total"] += 1
         total += 1
         if readonly:
@@ -46,9 +60,16 @@ def parse_volume_status(payload: object, expected_readonly_ids: set[int]) -> dic
         else:
             counts["writable"] += 1
             writable += 1
+        volume_details.append({
+            "id": volume_id,
+            "collection": raw_collection,
+            "readonly": readonly,
+            "expected_readonly": readonly and volume_id in expected_readonly_ids,
+        })
 
     readonly_ids.sort()
     unexpected_ids.sort()
+    volume_details.sort(key=lambda volume: int(volume["id"]))
     return {
         "checked": True,
         "total": total,
@@ -58,6 +79,7 @@ def parse_volume_status(payload: object, expected_readonly_ids: set[int]) -> dic
         "unexpected_readonly": len(unexpected_ids),
         "readonly_volume_ids": readonly_ids,
         "unexpected_readonly_volume_ids": unexpected_ids,
+        "volume_details": volume_details,
         "collections": collections,
     }
 

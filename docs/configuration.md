@@ -277,6 +277,9 @@ The selected target becomes SeaweedFS `-dir.idx`. Indexes must remain persistent
 | `encrypt_volume_data` | `false` | Enable SeaweedFS volume encryption |
 | `volume_health_enabled` | `true` | Require the upstream volume-server `/status` check before and during readiness |
 | `expected_readonly_volume_ids` | `[]` | Explicit volume IDs whose SeaweedFS `ReadOnly` state is intentionally accepted |
+| `auto_index_repair_enabled` | `true` | Reconstruct unexpected read-only `.idx` files during guarded offline recovery |
+| `index_repair_concurrency` | `1` | Maximum simultaneous remote `.dat` scans; valid range is 1–8 |
+| `index_repair_timeout_seconds` | `3600` | Per-volume deadline for fingerprinting and `weed fix` reconstruction |
 
 Raw argument arrays are available:
 
@@ -292,6 +295,10 @@ Guardian-owned bind addresses, internal dependencies, data paths, index paths, f
 The bundled appliance supervises one volume server. Keep `default_replication = "000"` unless the deployment has deliberately added and independently managed enough volume servers to satisfy another placement.
 
 The guardian consumes SeaweedFS's own `ReadOnly` result and does not reproduce its volume-full, sealed, or disk-pressure rules. An upstream read-only ID is unexpected unless it is explicitly listed. Keep the list empty for new deployments. Add an ID only after independent operator certification; never use the list to suppress an index-integrity incident.
+
+Automatic repair requires `volume_health_enabled = true` and is enabled safely by default, including for existing configurations that omit the new settings. Concurrency defaults to one because scans read the complete remote `.dat` and can place sustained load on network storage. Increasing it does not weaken writer shutdown, source read-only exposure, backups, or upstream validation.
+
+There is no configuration for writing or truncating `.dat`, ignoring `weed fix` errors, skipping backups, accepting a missing volume, or bypassing upstream rejection.
 
 ## `[s3]`
 

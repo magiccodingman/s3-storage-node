@@ -114,6 +114,9 @@ class SeaweedConfig:
     encrypt_volume_data: bool = False
     volume_health_enabled: bool = True
     expected_readonly_volume_ids: tuple[int, ...] = ()
+    auto_index_repair_enabled: bool = True
+    index_repair_concurrency: int = 1
+    index_repair_timeout_seconds: int = 3600
 
 
 @dataclass(frozen=True)
@@ -179,6 +182,10 @@ class Config:
     @property
     def index_path(self) -> Path:
         return self.targets[self.index.target].storage_root / self.index.directory
+
+    @property
+    def index_repair_path(self) -> Path:
+        return self.index_path / ".s3-storage-node-repair"
 
     @property
     def worker_endpoint_host(self) -> str:

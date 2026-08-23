@@ -21,6 +21,11 @@ def test_volume_status_uses_upstream_readonly_state_and_reports_collections() ->
     assert result["readonly"] == 2
     assert result["writable"] == 1
     assert result["unexpected_readonly_volume_ids"] == [23]
+    assert result["volume_details"] == [
+        {"id": 23, "collection": "s3-orchestrator-data", "readonly": True, "expected_readonly": False},
+        {"id": 24, "collection": "s3-orchestrator-data", "readonly": False, "expected_readonly": False},
+        {"id": 99, "collection": "archive", "readonly": True, "expected_readonly": True},
+    ]
     assert result["collections"]["s3-orchestrator-data"] == {
         "total": 2, "readonly": 1, "writable": 1,
     }

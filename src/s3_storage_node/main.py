@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 
 from .config import ConfigError, load_config
+from .index_repair import IndexRepairError, RepairJournal, journal_status
 from .storage import (
     StorageError,
     mount_target,
@@ -60,6 +61,14 @@ def parser() -> argparse.ArgumentParser:
 
     health = subcommands.add_parser("health", help="check the configured readiness endpoint")
     health.add_argument("--config", default="/etc/s3-storage-node/config.toml")
+
+    index_repair = subcommands.add_parser("index-repair", help="inspect or authorize guarded index repair")
+    index_repair_commands = index_repair.add_subparsers(dest="index_repair_command", required=True)
+    repair_status = index_repair_commands.add_parser("status", help="read the persistent repair journal")
+    repair_status.add_argument("--config", default="/etc/s3-storage-node/config.toml")
+    repair_retry = index_repair_commands.add_parser("retry", help="authorize one guarded retry for a failed source")
+    repair_retry.add_argument("--config", default="/etc/s3-storage-node/config.toml")
+    repair_retry.add_argument("--volume-id", required=True, type=int)
     return root
 
 
@@ -105,6 +114,24 @@ def main(argv: list[str] | None = None) -> int:
             with urllib.request.urlopen(url, timeout=2) as response:
                 return 0 if response.status == 200 else 1
         except (ConfigError, OSError, urllib.error.URLError):
+            return 1
+    if command == "index-repair":
+        try:
+            config = load_config(args.config)
+            if args.index_repair_command == "status":
+                print(json.dumps(journal_status(config), sort_keys=True))
+            else:
+                if args.volume_id <= 0:
+                    raise IndexRepairError("--volume-id must be positive")
+                transaction = RepairJournal(config.index_repair_path).request_retry(args.volume_id)
+                print(json.dumps({
+                    "retry_requested": True,
+                    "volume_id": args.volume_id,
+                    "transaction_id": transaction["transaction_id"],
+                }, sort_keys=True))
+            return 0
+        except (ConfigError, IndexRepairError, OSError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
             return 1
     if command in {"transport-status", "transport-select"}:
         try:
