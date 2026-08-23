@@ -5,7 +5,6 @@ import os
 import secrets
 import shutil
 import socket
-import struct
 import subprocess
 import time
 import uuid
@@ -551,23 +550,6 @@ def test_real_cifs_to_sshfs_chaos_failover(tmp_path: Path) -> None:
         assert primary_again_generation > secondary_generation
         _assert_objects(s3_port, bucket, objects, access, secret)
 
-        # Select the workload's persisted local index while the healthy
-        # generation is still online. A hard container kill can race the
-        # runner's final index-buffer flush, so discovering a nonempty file
-        # only after that kill makes the fault injection nondeterministic.
-        index_root = Path(env["CHAOS_DIR"]) / "state" / "index" / "volume-indexes"
-
-        def workload_indexes():
-            indexes = sorted(
-                path for path in index_root.glob(f"{bucket}_*.idx")
-                if path.stat().st_size >= 16
-            )
-            return indexes or None
-
-        indexes = _wait(workload_indexes, "persisted workload index", timeout=30)
-        damaged_index = indexes[0]
-        damaged_volume_id = int(damaged_index.stem.rsplit("_", 1)[-1])
-
         # Repeat the failure, but crash the guardian after it persisted the CIFS
         # failure and fenced the worker. On restart the persistent selector must
         # continue with SSHFS rather than forgetting the half-completed failover.
@@ -579,8 +561,45 @@ def test_real_cifs_to_sshfs_chaos_failover(tmp_path: Path) -> None:
         # authoritative remote .dat survives, while the local .idx contains a
         # final entry whose referenced offset is far beyond EOF. The container
         # is stopped here, so no SeaweedFS writer can race this fault injection.
-        with damaged_index.open("ab") as handle:
-            handle.write(struct.pack(">QII", 0xFFFFFFFFFFFFFFFF, 0x3FFFFFFF, 100))
+        # Use a one-shot container with the same state mount because its
+        # root-owned contents are not readable by the GitHub runner account.
+        # Its entrypoint is only this bounded mutation; it starts no guardian or
+        # SeaweedFS component and exits before recovery begins.
+        node_image = _compose(project, env, "images", "-q", "node").stdout.strip().splitlines()[-1]
+        injection = _run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--read-only",
+                "-v",
+                f"{env['CHAOS_DIR']}/state:/var/lib/s3-storage-node",
+                "--entrypoint",
+                "python3",
+                node_image,
+                "-c",
+                (
+                    "import json, os, pathlib, struct, sys; "
+                    "root=pathlib.Path(sys.argv[1]); bucket=sys.argv[2]; "
+                    "indexes=sorted(root.glob(f'{bucket}_*.idx')); "
+                    "assert indexes, f'no workload index under {root}'; "
+                    "path=indexes[0]; "
+                    "handle=path.open('ab'); "
+                    "handle.write(struct.pack('>QII', 0xffffffffffffffff, 0x3fffffff, 100)); "
+                    "handle.flush(); os.fsync(handle.fileno()); handle.close(); "
+                    "print(json.dumps({'name': path.name, "
+                    "'volume_id': int(path.stem.rsplit('_', 1)[-1])}))"
+                ),
+                "/var/lib/s3-storage-node/index/volume-indexes",
+                bucket,
+            ],
+            timeout=60,
+        )
+        injected = json.loads(injection.stdout.strip().splitlines()[-1])
+        damaged_index_name = str(injected["name"])
+        damaged_volume_id = int(injected["volume_id"])
 
         # The four-second deadline above deliberately exercises hard fencing
         # during transport loss.  Give the subsequent repair generation a
@@ -602,8 +621,26 @@ def test_real_cifs_to_sshfs_chaos_failover(tmp_path: Path) -> None:
         repair = restarted_secondary["index_repair"]
         assert repair["counters"]["succeeded_total"] >= 1
         assert damaged_volume_id in repair["verified_volume_ids"]
-        repair_backups = index_root / ".s3-storage-node-repair" / "backups"
-        assert any(repair_backups.glob(f"*/{damaged_index.name}"))
+        backup_check = _compose(
+            project,
+            env,
+            "exec",
+            "-T",
+            "node",
+            "python3",
+            "-c",
+            (
+                "import pathlib, sys; "
+                "root=pathlib.Path(sys.argv[1]); name=sys.argv[2]; "
+                "matches=list(root.glob(f'*/{name}')); "
+                "raise SystemExit(0 if matches else 1)"
+            ),
+            "/var/lib/s3-storage-node/index/volume-indexes/.s3-storage-node-repair/backups",
+            damaged_index_name,
+            check=False,
+            timeout=30,
+        )
+        assert backup_check.returncode == 0, "automatic repair did not retain the old index backup"
         _assert_objects(s3_port, bucket, objects, access, secret)
         restart_key = "after-guardian-restart"
         objects[restart_key] = secrets.token_bytes(2 * 1024 * 1024)
