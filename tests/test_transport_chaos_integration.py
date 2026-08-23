@@ -479,13 +479,18 @@ def test_real_cifs_to_sshfs_chaos_failover(tmp_path: Path) -> None:
         # timeout must become a transport failure, readiness must be withdrawn,
         # and the generation veth must be absent before SSHFS recovery starts.
         _drop_smb(project, env)
-        _wait_primary_failure(project, env)
         unavailable = _wait(
-            lambda: (snapshot := _health(health_port)) and not snapshot.get("ready") and snapshot,
+            lambda: (
+                (snapshot := _health(health_port))
+                and not snapshot.get("ready")
+                and int(snapshot["generation"]["id"]) == primary_generation
+                and snapshot
+            ),
             "readiness withdrawal after CIFS loss",
             timeout=60,
         )
         assert int(unavailable["generation"]["id"]) == primary_generation
+        _wait_primary_failure(project, env)
         link = _compose(
             project,
             env,
@@ -546,6 +551,23 @@ def test_real_cifs_to_sshfs_chaos_failover(tmp_path: Path) -> None:
         assert primary_again_generation > secondary_generation
         _assert_objects(s3_port, bucket, objects, access, secret)
 
+        # Select the workload's persisted local index while the healthy
+        # generation is still online. A hard container kill can race the
+        # runner's final index-buffer flush, so discovering a nonempty file
+        # only after that kill makes the fault injection nondeterministic.
+        index_root = Path(env["CHAOS_DIR"]) / "state" / "index" / "volume-indexes"
+
+        def workload_indexes():
+            indexes = sorted(
+                path for path in index_root.glob(f"{bucket}_*.idx")
+                if path.stat().st_size >= 16
+            )
+            return indexes or None
+
+        indexes = _wait(workload_indexes, "persisted workload index", timeout=30)
+        damaged_index = indexes[0]
+        damaged_volume_id = int(damaged_index.stem.rsplit("_", 1)[-1])
+
         # Repeat the failure, but crash the guardian after it persisted the CIFS
         # failure and fenced the worker. On restart the persistent selector must
         # continue with SSHFS rather than forgetting the half-completed failover.
@@ -557,11 +579,6 @@ def test_real_cifs_to_sshfs_chaos_failover(tmp_path: Path) -> None:
         # authoritative remote .dat survives, while the local .idx contains a
         # final entry whose referenced offset is far beyond EOF. The container
         # is stopped here, so no SeaweedFS writer can race this fault injection.
-        index_root = Path(env["CHAOS_DIR"]) / "state" / "index" / "volume-indexes"
-        indexes = sorted(path for path in index_root.glob("*.idx") if path.stat().st_size >= 16)
-        assert indexes, "chaos workload did not create a repairable local index"
-        damaged_index = indexes[0]
-        damaged_volume_id = int(damaged_index.stem.rsplit("_", 1)[-1])
         with damaged_index.open("ab") as handle:
             handle.write(struct.pack(">QII", 0xFFFFFFFFFFFFFFFF, 0x3FFFFFFF, 100))
 
