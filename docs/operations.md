@@ -38,6 +38,9 @@ Important events include:
 - `storage_transport_selected`
 - `storage_mounted`
 - `recovery_stable`
+- `seaweed_volume_status_changed_during_startup`
+- `seaweed_volume_status_probe_failed`
+- `seaweed_volume_status_stable`
 - `appliance_online`
 - `appliance_suspect`
 - `worker_generation_fenced`
