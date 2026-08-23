@@ -8,7 +8,7 @@ probe_interval_seconds = 5
 full_probe_interval_seconds = 60
 probe_timeout_seconds = 4
 startup_timeout_seconds = 30
-shutdown_grace_seconds = 20
+shutdown_grace_seconds = 45
 recovery_initial_seconds = 5
 recovery_max_seconds = 60
 recovery_stability_seconds = 15
@@ -125,7 +125,9 @@ encrypt_volume_data = false
 # enabled so readiness closes on any read-only volume not explicitly accepted.
 volume_health_enabled = true
 # Only list volume IDs whose upstream ReadOnly state is intentionally accepted.
-# Do not add an ID merely to restore readiness after an integrity warning.
+# Do not add an ID merely to restore readiness after an integrity warning. If an
+# official fix candidate is rejected due to a malformed tail, verify rollback,
+# never use -ignoreError, and record the certification reason beside the IDs.
 expected_readonly_volume_ids = []
 master_extra_args = []
 volume_extra_args = []

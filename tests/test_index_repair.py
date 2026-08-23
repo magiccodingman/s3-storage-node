@@ -425,6 +425,7 @@ def test_health_metrics_include_repair_counters() -> None:
             "detected_total": 3,
             "attempted_total": 2,
             "succeeded_total": 1,
+            "resolved_without_install_total": 1,
             "failed_total": 1,
             "rolled_back_total": 1,
         },
@@ -441,6 +442,7 @@ def test_health_metrics_include_repair_counters() -> None:
     Handler._metrics(handler, snapshot)
     metrics = lines[0].decode()
     assert "s3_storage_node_index_repairs_succeeded_total 1" in metrics
+    assert "s3_storage_node_index_repairs_resolved_without_install_total 1" in metrics
     assert "s3_storage_node_index_repair_pending 2" in metrics
     assert "s3_storage_node_index_repair_current_volume 2" in metrics
 
@@ -498,6 +500,80 @@ def test_crash_before_candidate_completion_resumes_safely(tmp_path: Path, phase:
     assert live_idx.read_bytes() == b"candidate-index"
     assert len(controller.journal.load_all()) == 1
     assert controller.journal.load_all()[0]["phase"] == "awaiting_upstream_validation"
+
+
+def test_stale_preinstall_is_resolved_when_stable_upstream_no_longer_requests_it(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    live_idx = config.index_path / "photos_1.idx"
+    live_idx.write_bytes(b"old-index")
+    health = HealthState()
+    controller = IndexRepairController(config, health)
+    controller.prepare_offline()
+    fingerprint = controller._enrich_fingerprint(
+        raw_fingerprint(), dataset="dataset-1", transport="sshfs-secondary",
+        collection="photos", volume_id=1,
+    )
+    from s3_storage_node.index_repair import _hash_file
+
+    transaction = controller.journal.create({
+        "generation_id": 20,
+        "active_transport": "sshfs-secondary",
+        "generation_failure_cause": "seaweed_volume_health_failure",
+        "dataset_sentinel_id": "dataset-1",
+        "collection": "photos",
+        "volume_id": 1,
+        "base_name": "photos_1",
+        "source_dat_path": str(config.volume_path / "photos_1.dat"),
+        "source_fingerprint": fingerprint,
+        "live_idx_path": str(live_idx),
+        "live_sdx_path": str(config.index_path / "photos_1.sdx"),
+        "old_idx": _hash_file(live_idx),
+        "old_sdx": None,
+        "attempt_count": 1,
+    })
+    staging = controller.journal.staging_dir / transaction["transaction_id"]
+    staging.mkdir()
+    (staging / "partial.idx").write_bytes(b"partial")
+    transaction["staging_dir"] = str(staging)
+    controller.journal.transition(transaction, "candidate_building")
+
+    assert controller.reconcile_resolved_preinstall(status(readonly=False)) == [1]
+    resolved = controller.journal.load_all()[0]
+    assert resolved["phase"] == "resolved_without_install"
+    assert resolved["candidate_installed"] is False
+    assert not staging.exists()
+    snapshot = health.snapshot()["index_repair"]
+    assert snapshot["pending_volume_ids"] == []
+    assert snapshot["resolved_without_install_volume_ids"] == [1]
+    assert snapshot["counters"]["resolved_without_install_total"] == 1
+
+    install_fake_builder(controller)
+    controller.repair_detected(
+        status(), generation_id=21, active_transport="sshfs-secondary",
+        generation_failure_cause="seaweed_volume_health_failure",
+    )
+    current = controller.awaiting()[0]
+    assert current["attempt_count"] == 1
+    assert current["transaction_id"] != resolved["transaction_id"]
+
+
+def test_resolved_preinstall_reconciliation_never_skips_upstream_candidate_validation(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    (config.index_path / "photos_1.idx").write_bytes(b"old-index")
+    controller = IndexRepairController(config, HealthState())
+    controller.prepare_offline()
+    install_fake_builder(controller)
+    controller.repair_detected(
+        status(), generation_id=22, active_transport="cifs-primary",
+        generation_failure_cause="seaweed_volume_health_failure",
+    )
+
+    assert controller.reconcile_resolved_preinstall(status(readonly=False)) == []
+    assert controller.awaiting()[0]["phase"] == "awaiting_upstream_validation"
 
 
 @pytest.mark.parametrize("phase", ["candidate_built", "backup_created"])

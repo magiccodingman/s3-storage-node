@@ -197,6 +197,10 @@ The original `.idx` and any `.sdx` are hash-verified and retained before atomic 
 
 After restart, each target must be present in `/status` with `ReadOnly=false`. A rejected or missing target causes another complete writer stop, restoration of that volume's original `.idx` and `.sdx`, and a persistent manual-intervention block. A complete record beyond the old index is normally recovered. An incomplete final record may produce no valid candidate or may still be rejected by the volume server; the appliance never truncates the `.dat` to make it load.
 
+An interrupted transaction that never reached candidate installation can outlive the status sample that triggered it. Once the startup status has passed the configured stability gate and that exact volume is present but no longer unexpectedly read-only, the guardian marks the transaction `resolved_without_install` and removes only its transaction-owned staging directory. It does not touch the live `.idx`, `.sdx`, retained backups, or `.dat`. Candidate-installed, rolled-back, and manual-intervention transactions are excluded from this reconciliation.
+
+If the bundled official `weed fix` succeeds but SeaweedFS still rejects the candidate because its tail entries extend beyond authoritative `.dat` EOF, leave the automatic rollback in place. Do not retry with `-ignoreError` and do not truncate the `.dat`. An operator may explicitly certify the volume as expected read-only only after verifying the rollback and retained data; document the reason next to `expected_readonly_volume_ids` in the deployment configuration.
+
 Inspect repair state without changing it:
 
 ```bash
@@ -214,7 +218,7 @@ docker compose exec s3-storage-node \
 
 Retry authorization does not run `weed fix` immediately and bypasses no checks. The next offline recovery still requires writer shutdown, read-only staging, fingerprints, backups, atomic installation, and upstream validation.
 
-`/healthz` exposes `index_repair` state, current/pending/verified/failed IDs, transaction identity, timestamps, and the last error. Prometheus exposes repair detection, attempt, success, failure, rollback, pending, and current-volume metrics without permanent per-volume labels.
+`/healthz` exposes `index_repair` state, current/pending/verified/resolved-without-install/failed IDs, transaction identity, timestamps, and the most recent persistent failure. Prometheus exposes repair detection, attempt, success, resolved-without-install, failure, rollback, pending, and current-volume metrics without permanent per-volume labels.
 
 Never run orphan deletion during or immediately after an index incident. Corrupt indexes can make orphan conclusions unreliable, and automatic repair intentionally contains no orphan deletion path.
 
