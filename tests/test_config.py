@@ -65,6 +65,7 @@ def test_loads_valid_path_configuration(tmp_path: Path) -> None:
     assert config.metadata_path == tmp_path / "state" / "meta" / "filer"
     assert config.index_path == tmp_path / "state" / "index" / "volume-indexes"
     assert config.index_repair_path == config.index_path / ".s3-storage-node-repair"
+    assert config.appliance.shutdown_grace_seconds == 45
     assert config.seaweed.auto_index_repair_enabled is True
     assert config.seaweed.index_repair_concurrency == 1
     assert config.seaweed.index_repair_timeout_seconds == 3600

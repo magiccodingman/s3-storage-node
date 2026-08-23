@@ -383,6 +383,8 @@ class Guardian(BaseGuardian):
             raise
         if not result:
             return result
+        if self.index_repair is not None:
+            self.index_repair.reconcile_resolved_preinstall(dict(result))
         if self.index_repair is not None and self.index_repair.has_awaiting_validation():
             raise IndexValidationRequired(dict(result))
         self._certify_indexes_from_result(result)

@@ -282,6 +282,20 @@ def test_detected_readonly_volume_stops_writers_repairs_and_validates(tmp_path: 
     guardian._run_s3_canary.assert_called_once()
 
 
+def test_stable_writable_status_reconciles_only_preinstall_repair_work(tmp_path: Path) -> None:
+    guardian = make_guardian(tmp_path)
+    controller = Mock()
+    controller.has_awaiting_validation.return_value = False
+    guardian.index_repair = controller
+    guardian._certify_indexes_from_result = Mock()
+    result = repair_status(readonly=False)
+
+    assert guardian._accept_seaweed_volume_status(result) == result
+
+    controller.reconcile_resolved_preinstall.assert_called_once_with(result)
+    guardian._certify_indexes_from_result.assert_called_once_with(result)
+
+
 def test_repair_never_starts_when_a_writer_misses_shutdown_deadline(tmp_path: Path) -> None:
     guardian = make_guardian(tmp_path)
     controller = Mock()

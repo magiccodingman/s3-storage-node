@@ -194,6 +194,8 @@ This authority choice follows the appliance's persistence split: remote `.dat` a
 
 Each volume has an atomic, fsynced journal beneath `<index path>/.s3-storage-node-repair`. It records source identity and bounded hashes, generation and transport, old/candidate artifacts, attempts, phase history, backups, validation, rollback, and failures. Candidate and backup artifacts share the live index filesystem. Installation is write-ahead journaled and reconciled by recorded hashes after a crash; an ambiguous live artifact fails closed. Backups are retained indefinitely in the first implementation.
 
+Stable upstream status may invalidate an interrupted pre-install trigger before a candidate was installed. In that case only the journal and transaction-owned staging directory are changed: the record becomes `resolved_without_install`, the partial staging artifact is removed, and the attempt does not consume the retry budget for a future genuine incident. Candidate-installed transactions are never resolved this way and still require explicit upstream validation.
+
 SeaweedFS `/status` is the final candidate authority. A repaired ID must still be present and explicitly writable; absence is rejection, not success. Rejected candidates are rolled back after writers stop again and their identical source fingerprint is blocked from automatic retry. Successful volumes in a batch remain repaired when another volume fails.
 
 Configuration, identity, fence, lingering-process, or blocked-helper failures leave the endpoint unavailable and are repeatedly reported. Unknown storage is never initialized unless `allow_initialize` is explicitly enabled.
