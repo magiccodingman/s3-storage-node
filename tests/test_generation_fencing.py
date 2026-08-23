@@ -84,7 +84,7 @@ def make_guardian(tmp_path: Path) -> Guardian:
     return Guardian(config, "/config.toml")
 
 
-def test_guardian_fences_generation_before_stopping_processes(tmp_path: Path) -> None:
+def test_guardian_cleanly_drains_and_detaches_before_fencing(tmp_path: Path) -> None:
     guardian = make_guardian(tmp_path)
     events: list[str] = []
     generation = Mock()
@@ -104,13 +104,52 @@ def test_guardian_fences_generation_before_stopping_processes(tmp_path: Path) ->
     generation.fence.side_effect = fence
     guardian.generation = generation
     guardian.processes = []
-    guardian._stop_seaweed = Mock(side_effect=lambda: events.append("stop"))
+    guardian._stop_seaweed = Mock(side_effect=lambda **_kwargs: events.append("stop") or True)
+    guardian._repair_targets = Mock(side_effect=lambda unmount_all=False, **_kwargs: events.append("detach") or True)
+    guardian.generation_history.start(4, transport="cifs", mode="namespace")
 
-    guardian._fence_generation("storage lost")
-    guardian._stop_seaweed()
+    assert guardian._terminate_generation(
+        "storage lost", cause="storage_failure", phase="ONLINE",
+    ) is True
 
-    assert events == ["fence:storage lost", "stop"]
+    assert events == ["stop", "detach", "fence:storage lost"]
     assert guardian.health.snapshot()["generation"]["fenced"] is True
+    recent = guardian.health.snapshot()["generation_history"]["recent"][-1]
+    assert recent["clean_shutdown"] is True
+    assert recent["cause"] == "storage_failure"
+
+
+def test_guardian_hard_fences_before_detach_when_drain_fails(tmp_path: Path) -> None:
+    guardian = make_guardian(tmp_path)
+    events: list[str] = []
+    generation = Mock()
+    generation.generation = 5
+    generation.token = "token"
+    generation.mode = "namespace"
+    generation.namespace_pid = 45
+    generation.worker_ip = "169.254.254.2"
+    generation.fenced = False
+    generation.fence_reason = ""
+
+    def fence(reason: str) -> None:
+        events.append(f"fence:{reason}")
+        generation.fenced = True
+        generation.fence_reason = reason
+
+    generation.fence.side_effect = fence
+    guardian.generation = generation
+    guardian._stop_seaweed = Mock(side_effect=lambda **_kwargs: events.append("stop") or False)
+    guardian._repair_targets = Mock(side_effect=lambda unmount_all=False, **_kwargs: events.append("detach") or False)
+    guardian.generation_history.start(5, transport="sshfs", mode="namespace")
+
+    assert guardian._terminate_generation(
+        "storage probe timed out for data", cause="storage_failure", phase="ONLINE",
+    ) is True
+
+    assert events == ["stop", "fence:storage probe timed out for data", "detach"]
+    history = guardian.health.snapshot()["generation_history"]
+    assert history["indexes_certified"] is False
+    assert history["recent"][-1]["clean_shutdown"] is False
 
 
 def test_lingering_process_still_blocks_replacement_generation(tmp_path: Path) -> None:
@@ -122,6 +161,20 @@ def test_lingering_process_still_blocks_replacement_generation(tmp_path: Path) -
 
     with pytest.raises(Exception, match="still blocked: volume"):
         guardian._begin_generation()
+
+
+def test_generation_creation_failures_are_visible_in_churn_history(tmp_path: Path) -> None:
+    guardian = make_guardian(tmp_path)
+    guardian.generation_factory.last_allocated_generation = 701
+    guardian.generation_factory.create = Mock(side_effect=GenerationError("namespace setup failed"))
+
+    with pytest.raises(GenerationError, match="namespace setup failed"):
+        guardian._begin_generation()
+
+    history = guardian.health.snapshot()["generation_history"]
+    assert history["counters"]["cause:generation_creation_failure"] == 1
+    assert history["recent"][-1]["generation"] == 701
+    assert history["recent"][-1]["phase"] == "CREATING_GENERATION"
 
 
 def test_haproxy_routes_to_worker_namespace_but_checks_root_health(tmp_path: Path) -> None:

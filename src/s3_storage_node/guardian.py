@@ -14,6 +14,7 @@ from .logging import event
 from .processes import ManagedProcess, ProcessError, wait_for_tcp
 from .render import render_filer_toml, render_haproxy, render_s3_config
 from .s3check import run_canary
+from .seaweed_health import SeaweedHealthError, inspect_volume_status
 from .storage import StorageError, prepare_barrier
 
 
@@ -123,7 +124,7 @@ class Guardian:
         target_name: str | None = None,
         *,
         full: bool = False,
-        timeout: int,
+        timeout: float,
     ) -> dict[str, object]:
         self._reap_helper_children()
         if operation != "unmount" and self.helper_children:
@@ -257,6 +258,9 @@ class Guardian:
             ManagedProcess("s3", s3, uid, gid),
         ]
 
+    def _worker_endpoint_host(self) -> str:
+        return str(getattr(self.config, "worker_endpoint_host", "127.0.0.1"))
+
     def _run_s3_canary(self) -> None:
         run_canary(
             self.config.seaweed.s3_internal_port,
@@ -279,6 +283,25 @@ class Guardian:
             wait_for_tcp("127.0.0.1", port, self.config.appliance.startup_timeout_seconds, process)
         if self.config.appliance.s3_canary_enabled:
             self._run_s3_canary()
+        self._check_seaweed_volumes()
+
+    def _check_seaweed_volumes(self) -> dict[str, object]:
+        if not getattr(self.config.seaweed, "volume_health_enabled", False):
+            return {}
+        result = inspect_volume_status(
+            self._worker_endpoint_host(),
+            self.config.seaweed.volume_port,
+            expected_readonly_ids=set(getattr(self.config.seaweed, "expected_readonly_volume_ids", ())),
+            timeout_seconds=self.config.appliance.probe_timeout_seconds,
+        )
+        self.health.set_seaweed_volumes(result)
+        unexpected = result["unexpected_readonly_volume_ids"]
+        if unexpected:
+            raise SeaweedHealthError(
+                "SeaweedFS reported unexpected read-only volumes: "
+                + ",".join(str(volume_id) for volume_id in unexpected)
+            )
+        return result
 
     def _stabilize_recovery(self) -> None:
         stability_seconds = getattr(self.config.appliance, "recovery_stability_seconds", 15)
@@ -290,6 +313,7 @@ class Guardian:
         successes = 0
         while not self.stopping:
             self._probe_targets(full=True)
+            self._check_seaweed_volumes()
             if self.config.appliance.s3_canary_enabled:
                 self._run_s3_canary()
             successes += 1
@@ -300,16 +324,29 @@ class Guardian:
             self._interruptible_sleep(probe_interval)
         raise KeyboardInterrupt
 
-    def _stop_seaweed(self) -> None:
+    def _stop_seaweed(self, *, deadline: float | None = None) -> bool:
         self.health.set("DRAINING", False, "stopping SeaweedFS")
+        if deadline is None:
+            deadline = time.monotonic() + self.config.appliance.shutdown_grace_seconds
+        all_stopped = True
         for process in reversed(self.processes):
             try:
-                stopped = process.stop(self.config.appliance.shutdown_grace_seconds)
+                stop_until = getattr(process, "stop_until", None)
+                if callable(stop_until):
+                    stopped = stop_until(deadline)
+                else:
+                    stopped = process.stop(max(0, int(deadline - time.monotonic())))
                 if not stopped:
-                    self.lingering_processes.append(process)
+                    all_stopped = False
+                    if process not in self.lingering_processes:
+                        self.lingering_processes.append(process)
             except Exception as exc:  # noqa: BLE001
+                all_stopped = False
+                if process.running() and process not in self.lingering_processes:
+                    self.lingering_processes.append(process)
                 event("error", "process_stop_failed", process=process.name, error=str(exc))
         self.processes = []
+        return all_stopped
 
     def _online_loop(self) -> None:
         next_full = time.monotonic() + self.config.appliance.full_probe_interval_seconds
@@ -323,6 +360,7 @@ class Guardian:
                 full = time.monotonic() >= next_full
                 self._probe_targets(full=full)
                 if full:
+                    self._check_seaweed_volumes()
                     if self.config.appliance.s3_canary_enabled:
                         self._run_s3_canary()
                     next_full = time.monotonic() + self.config.appliance.full_probe_interval_seconds
@@ -332,16 +370,29 @@ class Guardian:
                 raise
             self._interruptible_sleep(self.config.appliance.probe_interval_seconds)
 
-    def _repair_targets(self, unmount_all: bool = False) -> None:
+    def _repair_targets(self, unmount_all: bool = False, *, timeout_seconds: float | None = None) -> bool:
         self.health.set("RECOVERING", False, "repairing storage mounts")
+        detached = True
+        detach_deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
         for target in reversed(self.config.active_targets):
             if target.type == "path" and not unmount_all:
                 continue
             try:
-                self._run_helper("unmount", target.name, timeout=self.config.appliance.startup_timeout_seconds)
+                timeout = (
+                    self.config.appliance.startup_timeout_seconds
+                    if detach_deadline is None
+                    else max(0.0, detach_deadline - time.monotonic())
+                )
+                if timeout <= 0:
+                    detached = False
+                    event("error", "storage_detach_deadline_expired", target=target.name)
+                    continue
+                self._run_helper("unmount", target.name, timeout=timeout)
                 event("info", "storage_detached", target=target.name)
             except Exception as exc:  # noqa: BLE001
+                detached = False
                 event("error", "storage_detach_failed", target=target.name, error=str(exc))
+        return detached
 
     def _ensure_no_lingering_processes(self) -> None:
         alive = [process for process in self.lingering_processes if process.running()]

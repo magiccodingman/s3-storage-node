@@ -96,18 +96,18 @@ A listening socket is insufficient. Recovery requires repeated full storage prob
 
 Potentially blocking mount, unmount, enrollment, layout, and probe operations run in child processes with explicit timeouts. The guardian can withdraw readiness and physically fence a worker even when the kernel traps a helper in storage I/O.
 
-### Unexpected faults remain fence-first
+### Unexpected faults use a bounded drain
 
 When storage or a guarded process fails unexpectedly:
 
 1. readiness is withdrawn;
-2. the root side of the worker veth is deleted;
-3. SeaweedFS shutdown is attempted;
-4. managed storage is detached;
-5. the generation is retired only when safe;
+2. the S3 gateway and SeaweedFS processes are stopped under one global deadline;
+3. a clean detach is attempted after the volume writer exits;
+4. the worker veth is deleted after that clean detach, or immediately when drain/detach cannot complete;
+5. the clean/unclean outcome and cause are persisted before replacement;
 6. failed transport state is persisted and recovery selects an eligible route.
 
-The network fence happens before shutdown because the active storage path is no longer trusted.
+Readiness fencing is immediate. Physical fencing remains mandatory before replacement, but the bounded drain preserves the remote `.dat` transport long enough for SeaweedFS to finish whenever it can do so safely.
 
 ### Controlled switches drain before fencing
 
@@ -141,8 +141,8 @@ An unexpected online failure follows:
 ```text
 ONLINE
   → SUSPECT
-  → OFFLINE / FENCING
-  → DRAINING
+  → OFFLINE / DRAINING
+  → FENCING              after clean detach, or immediately on drain failure
   → RECOVERING
   → SELECTING_TRANSPORT
   → CREATING_GENERATION
@@ -177,7 +177,8 @@ Configuration, identity, fence, lingering-process, or blocked-helper failures le
     SeaweedFS master state
 
 /var/lib/s3-storage-node/guardian
-    local writer lock, generation counter, transport selector state
+    local writer lock, generation counter, bounded outcome history,
+    index-certification state, transport selector state
 
 configured metadata target
     embedded filer database, unless PostgreSQL/custom is selected

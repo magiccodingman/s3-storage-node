@@ -173,3 +173,46 @@ def test_pid_reuse_does_not_kill_unrelated_process(tmp_path: Path, monkeypatch: 
     storage._stop_sshfs_process(value)
     assert killed == []
     assert not Path(value.ssh_runtime_pid_file).exists()
+
+
+def test_sshfs_unmount_prefers_clean_detach(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    value = key_target(tmp_path)
+    mounted = SimpleNamespace(filesystem="fuse.sshfs", source=value.source)
+    states = iter([mounted, None])
+    commands: list[list[str]] = []
+    monkeypatch.setattr(storage, "find_mount", lambda _path: next(states))
+    monkeypatch.setattr(
+        storage, "_unmount_command",
+        lambda command: commands.append(command) or (True, ""),
+    )
+    monkeypatch.setattr(storage, "_stop_sshfs_process", lambda _target: None)
+    monkeypatch.setattr(storage, "prepare_barrier", lambda _target: None)
+
+    storage.unmount_target(value)
+
+    assert commands == [["fusermount3", "-u", str(value.mountpoint)]]
+
+
+def test_sshfs_unmount_uses_lazy_detach_only_after_clean_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value = key_target(tmp_path)
+    mounted = SimpleNamespace(filesystem="fuse.sshfs", source=value.source)
+    states = iter([mounted, None])
+    commands: list[list[str]] = []
+
+    def unmount(command: list[str]) -> tuple[bool, str]:
+        commands.append(command)
+        return (False, "busy") if "-z" not in command else (True, "")
+
+    monkeypatch.setattr(storage, "find_mount", lambda _path: next(states))
+    monkeypatch.setattr(storage, "_unmount_command", unmount)
+    monkeypatch.setattr(storage, "_stop_sshfs_process", lambda _target: None)
+    monkeypatch.setattr(storage, "prepare_barrier", lambda _target: None)
+
+    storage.unmount_target(value)
+
+    assert commands == [
+        ["fusermount3", "-u", str(value.mountpoint)],
+        ["fusermount3", "-u", "-z", str(value.mountpoint)],
+    ]

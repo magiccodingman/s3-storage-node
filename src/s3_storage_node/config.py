@@ -5,7 +5,17 @@ import os
 import tomllib
 from pathlib import Path
 
-from .config_helpers import ConfigError, _bool, _int, _positive, _relative_path, _string, _string_list, _table
+from .config_helpers import (
+    ConfigError,
+    _bool,
+    _int,
+    _int_list,
+    _positive,
+    _relative_path,
+    _string,
+    _string_list,
+    _table,
+)
 from .config_target import _parse_target
 from .config_types import (
     ApplianceConfig,
@@ -174,10 +184,20 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         filer_extra_args=tuple(_string_list(seaweed_raw.get("filer_extra_args"), "seaweed.filer_extra_args")),
         s3_extra_args=tuple(_string_list(seaweed_raw.get("s3_extra_args"), "seaweed.s3_extra_args")),
         encrypt_volume_data=_bool(seaweed_raw.get("encrypt_volume_data"), "seaweed.encrypt_volume_data", False),
+        volume_health_enabled=_bool(
+            seaweed_raw.get("volume_health_enabled"), "seaweed.volume_health_enabled", True,
+        ),
+        expected_readonly_volume_ids=tuple(
+            _int_list(seaweed_raw.get("expected_readonly_volume_ids"), "seaweed.expected_readonly_volume_ids")
+        ),
     )
     for field_name in ("master_port", "volume_port", "filer_port", "s3_internal_port", "volume_size_limit_mb", "filer_max_mb"):
         _positive(getattr(seaweed, field_name), f"seaweed.{field_name}")
     _positive(seaweed.volume_max, "seaweed.volume_max", allow_zero=True)
+    if any(volume_id <= 0 for volume_id in seaweed.expected_readonly_volume_ids):
+        raise ConfigError("seaweed.expected_readonly_volume_ids must contain positive volume IDs")
+    if len(seaweed.expected_readonly_volume_ids) != len(set(seaweed.expected_readonly_volume_ids)):
+        raise ConfigError("seaweed.expected_readonly_volume_ids must not contain duplicates")
 
     s3_raw = _table(raw, "s3")
     auth_mode = _string(s3_raw.get("auth_mode"), "s3.auth_mode", "static").lower()

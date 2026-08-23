@@ -4,7 +4,8 @@ services:
     build:
       context: .
       args:
-        SEAWEEDFS_VERSION: ${SEAWEEDFS_VERSION:-4.40}
+        SEAWEEDFS_VERSION: ${SEAWEEDFS_VERSION:-4.44}
+        SEAWEEDFS_DIGEST: ${SEAWEEDFS_DIGEST:-sha256:e67e8c385484120b78bff47ba5f4debbca47fbd27ed1a39f016f47e8baea615b}
     restart: unless-stopped
     cap_add:
       - SYS_ADMIN

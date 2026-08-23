@@ -20,7 +20,7 @@ Inspect detailed state:
 curl -fsS http://localhost:9090/healthz | jq
 ```
 
-The detailed response includes active storage probes, sentinel information, worker-generation identity and fence state, local writer-lock state, and exclusive transport state when enabled.
+The detailed response includes active storage probes, sentinel information, worker-generation identity and fence state, bounded generation history/cause counters, index-certification state, SeaweedFS volume topology, local writer-lock state, and exclusive transport state when enabled.
 
 The public S3 endpoint is usable only while `/ready` returns `200`. HAProxy returns `503` during mounting, certification, failure, fencing, draining, and recovery.
 
@@ -41,6 +41,9 @@ Important events include:
 - `appliance_online`
 - `appliance_suspect`
 - `worker_generation_fenced`
+- `worker_generation_gracefully_drained`
+- `worker_generation_hard_fence_required`
+- `seaweed_indexes_certified`
 - `process_stopping`
 - `storage_detached`
 - `storage_transport_failed`
@@ -132,18 +135,19 @@ Do not repeatedly issue requests while one is already pending. Inspect `transpor
 
 ## Automatic transport failure
 
-An unexpected data mount, enrollment, or storage-probe failure is treated differently from a controlled switch:
+An unexpected data mount, enrollment, or storage-probe failure follows the same ownership-safe termination controller:
 
 ```text
 withdraw readiness
-→ physically fence the active generation immediately
-→ attempt SeaweedFS shutdown and storage detach
+→ attempt SeaweedFS shutdown and clean detach under one global deadline
+→ physically fence after clean detach, or immediately when the deadline/failure requires it
+→ persist clean/unclean outcome, phase, cause, transport, and index trust
 → persist the failed transport
 → select another eligible transport after recovery backoff
-→ perform full storage and S3 certification
+→ perform full storage, SeaweedFS volume, and S3 certification
 ```
 
-The unexpected fault path is fence-first because the current storage route is no longer trusted.
+No replacement is created during the bounded drain. A hard-fenced generation leaves `indexes_certified=false` until the replacement generation passes SeaweedFS's upstream volume-status check.
 
 Generic HAProxy or SeaweedFS failures do not automatically condemn the active transport unless a data storage operation also fails.
 
@@ -155,7 +159,7 @@ A useful test is to drop or reject TCP port 445 while the node is online. Expect
 
 1. `/ready` becomes `503`.
 2. Public S3 returns `503`.
-3. The old worker generation is physically fenced.
+3. The old worker generation drains cleanly or is physically hard-fenced when the deadline expires.
 4. CIFS failure is persisted in selector state.
 5. The node selects and mounts SSHFS if configured and eligible.
 6. The same sentinel is verified through SSHFS.
@@ -163,7 +167,15 @@ A useful test is to drop or reject TCP port 445 while the node is online. Expect
 8. The node returns to `ONLINE` on SSHFS.
 9. Restoring port 445 does not cause automatic failback.
 
-The repository's privileged transport-chaos CI job exercises this sequence against real Samba and OpenSSH/SFTP containers, including object verification and guardian restart.
+The repository's privileged transport-chaos CI job exercises this sequence against real Samba and OpenSSH/SFTP containers, including object verification, upstream volume-status validation, index certification, cause history, and guardian restart.
+
+## Volume and index health
+
+The `seaweed_volumes` field in `/healthz` is populated directly from the volume server's `/status` response. The guardian does not infer why SeaweedFS set `ReadOnly`; it treats that upstream bit as authoritative. Any read-only ID not explicitly listed in `seaweed.expected_readonly_volume_ids` closes readiness and is reported in `unexpected_readonly_volume_ids`.
+
+Only add an expected ID after independently proving that its read-only lifecycle is intentional. Do not add an ID to hide an index-integrity error. When `indexes_certified=false`, orphan reports may be inspected, but destructive orphan/fsck application is prohibited. `orphan_deletion_safe` becomes true only after the upstream volume check recertifies the generation.
+
+The durable file `state_dir/guardian/generation-history.json` keeps the last 64 completed outcomes and counters by cause. A large generation number alone is not a failure; use the cause counters, phase, transport, duration, and clean/unclean outcome to diagnose churn.
 
 ## Guardian restart during failover
 

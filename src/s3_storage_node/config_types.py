@@ -112,6 +112,8 @@ class SeaweedConfig:
     filer_extra_args: tuple[str, ...] = ()
     s3_extra_args: tuple[str, ...] = ()
     encrypt_volume_data: bool = False
+    volume_health_enabled: bool = True
+    expected_readonly_volume_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)

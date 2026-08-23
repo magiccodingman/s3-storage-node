@@ -11,11 +11,11 @@ from pathlib import Path
 from . import __version__
 from .config import Config, ConfigError, load_config
 from .generation import GenerationError, GenerationFactory, LocalWriterLease, WorkerGeneration
+from .generation_history import GenerationHistory
 from .guardian import Guardian as BaseGuardian
 from .health import start_server
 from .logging import event
-from .processes import ManagedProcess, ProcessError, wait_for_tcp
-from .render import render_haproxy
+from .processes import ManagedProcess, wait_for_tcp
 from .s3check import run_canary
 from .storage import StorageError, prepare_barrier
 
@@ -37,7 +37,7 @@ def namespace_cwd_command(command: list[str], cwd: str | None) -> list[str]:
 
 
 class Guardian(BaseGuardian):
-    """Guardian with isolated worker generations and fence-first recovery."""
+    """Guardian with isolated worker generations and bounded-drain recovery."""
 
     def __init__(self, config: Config, config_path: str) -> None:
         super().__init__(config, config_path)
@@ -47,6 +47,8 @@ class Guardian(BaseGuardian):
         control_dir = state_dir / "guardian"
         self.writer_lease = LocalWriterLease(control_dir, node_name)
         self.generation_factory = GenerationFactory(control_dir, runtime_dir)
+        self.generation_history = GenerationHistory(control_dir)
+        self.health.set_generation_history(self.generation_history.snapshot())
         self.generation: WorkerGeneration | None = None
         self.fatal_fence_failure = False
 
@@ -58,6 +60,8 @@ class Guardian(BaseGuardian):
         except GenerationError as exc:
             event("critical", "writer_lease_unavailable", error=str(exc))
             return 3
+        self.generation_history.recover_interrupted_active()
+        self.health.set_generation_history(self.generation_history.snapshot())
         self.health.set_writer(held=True, owner=self.writer_lease.node_name)
         try:
             self._prepare_directories()
@@ -82,12 +86,15 @@ class Guardian(BaseGuardian):
                 except Exception as exc:  # noqa: BLE001 - appliance boundary
                     if self.stopping:
                         break
+                    phase = str(self.health.snapshot().get("state", "unknown"))
+                    cause = self.generation_history.classify_cause(exc, phase)
                     self.health.increment_failure()
                     self.health.set("OFFLINE", False, str(exc))
-                    event("error", "appliance_offline", error=str(exc), error_type=type(exc).__name__)
-                    fenced = self._fence_generation(str(exc))
-                    self._stop_seaweed()
-                    self._repair_targets()
+                    event(
+                        "error", "appliance_offline", error=str(exc), error_type=type(exc).__name__,
+                        generation_cause=cause, failure_phase=phase,
+                    )
+                    fenced = self._terminate_generation(str(exc), cause=cause, phase=phase)
                     if not fenced:
                         self.stopping = True
                         break
@@ -98,11 +105,11 @@ class Guardian(BaseGuardian):
                     delay = min(delay * 2, self.config.appliance.recovery_max_seconds)
 
             self.health.set("STOPPING", False, "container stopping")
-            self._fence_generation("container stopping")
-            self._stop_seaweed()
+            self._terminate_generation(
+                "container stopping", cause="container_shutdown", phase="STOPPING", unmount_all=True,
+            )
             if self.haproxy:
                 self.haproxy.stop(self.config.appliance.shutdown_grace_seconds)
-            self._repair_targets(unmount_all=True)
             self._retire_generation()
             return 4 if self.fatal_fence_failure else 0
         finally:
@@ -140,12 +147,36 @@ class Guardian(BaseGuardian):
             self._retire_generation()
         appliance = self.config.appliance
         self.health.set("CREATING_GENERATION", False, "creating isolated worker generation")
-        self.generation = self.generation_factory.create(
-            mode=getattr(appliance, "worker_fencing_mode", "disabled"),
-            host_address=getattr(appliance, "worker_host_address", "169.254.254.1/30"),
-            worker_address=getattr(appliance, "worker_address", "169.254.254.2/30"),
-            gateway=getattr(appliance, "worker_gateway", "169.254.254.1"),
+        try:
+            self.generation = self.generation_factory.create(
+                mode=getattr(appliance, "worker_fencing_mode", "disabled"),
+                host_address=getattr(appliance, "worker_host_address", "169.254.254.1/30"),
+                worker_address=getattr(appliance, "worker_address", "169.254.254.2/30"),
+                gateway=getattr(appliance, "worker_gateway", "169.254.254.1"),
+            )
+        except Exception as exc:
+            allocated = self.generation_factory.last_allocated_generation
+            if allocated > 0:
+                self.generation_history.start(
+                    allocated,
+                    transport=str(getattr(self, "active_transport", "")),
+                    mode=str(getattr(appliance, "worker_fencing_mode", "disabled")),
+                )
+                self.generation_history.finish(
+                    cause="generation_creation_failure",
+                    reason=str(exc),
+                    phase="CREATING_GENERATION",
+                    clean_shutdown=False,
+                    fence_verified=False,
+                )
+                self.health.set_generation_history(self.generation_history.snapshot())
+            raise
+        self.generation_history.start(
+            self.generation.generation,
+            transport=str(getattr(self, "active_transport", "")),
+            mode=self.generation.mode,
         )
+        self.health.set_generation_history(self.generation_history.snapshot())
         self._publish_generation("active")
         event(
             "info", "worker_generation_created",
@@ -192,6 +223,56 @@ class Guardian(BaseGuardian):
         event("warning", "worker_generation_fenced", generation=self.generation.generation, reason=reason)
         return True
 
+    def _terminate_generation(
+        self,
+        reason: str,
+        *,
+        cause: str,
+        phase: str,
+        unmount_all: bool = False,
+    ) -> bool:
+        """Drain and detach first, falling back to a verified hard fence."""
+
+        if self.generation is None:
+            self._stop_seaweed()
+            self._repair_targets(unmount_all=unmount_all)
+            return True
+
+        drain_deadline = time.monotonic() + self.config.appliance.shutdown_grace_seconds
+        processes_stopped = self._stop_seaweed(deadline=drain_deadline)
+        detached = False
+        if processes_stopped:
+            detached = self._repair_targets(
+                unmount_all=unmount_all,
+                timeout_seconds=max(0.0, drain_deadline - time.monotonic()),
+            )
+
+        clean_shutdown = processes_stopped and detached
+        if clean_shutdown:
+            event(
+                "info", "worker_generation_gracefully_drained",
+                generation=self.generation.generation, cause=cause, reason=reason,
+            )
+            fenced = self._fence_generation(reason)
+        else:
+            event(
+                "warning", "worker_generation_hard_fence_required",
+                generation=self.generation.generation, cause=cause, reason=reason,
+                processes_stopped=processes_stopped, storage_detached=detached,
+            )
+            fenced = self._fence_generation(reason)
+            self._repair_targets(unmount_all=unmount_all)
+
+        self.generation_history.finish(
+            cause=cause,
+            reason=reason,
+            phase=phase,
+            clean_shutdown=clean_shutdown,
+            fence_verified=fenced,
+        )
+        self.health.set_generation_history(self.generation_history.snapshot())
+        return fenced
+
     def _retire_generation(self) -> None:
         if self.generation is None:
             return
@@ -224,7 +305,7 @@ class Guardian(BaseGuardian):
         target_name: str | None = None,
         *,
         full: bool = False,
-        timeout: int,
+        timeout: float,
     ) -> dict[str, object]:
         self._reap_helper_children()
         if operation != "unmount" and self.helper_children:
@@ -283,6 +364,27 @@ class Guardian(BaseGuardian):
             host=self._worker_endpoint_host(),
             external_url=self.config.s3.external_url,
         )
+
+    def _check_seaweed_volumes(self) -> dict[str, object]:
+        result = super()._check_seaweed_volumes()
+        if not result:
+            return result
+        history = self.generation_history.snapshot()
+        if not history["indexes_certified"]:
+            self.generation_history.certify_indexes(
+                "SeaweedFS loaded every volume without an unexpected upstream ReadOnly state"
+            )
+            history = self.generation_history.snapshot()
+            self.health.set_generation_history(history)
+            event(
+                "info", "seaweed_indexes_certified",
+                generation=self.generation.generation if self.generation else 0,
+                volumes=result.get("total", 0),
+            )
+        result = dict(result)
+        result["orphan_deletion_safe"] = bool(history["indexes_certified"])
+        self.health.set_seaweed_volumes(result)
+        return result
 
     def _start_seaweed(self) -> None:
         self.health.set("STARTING_SEAWEED", False, "starting SeaweedFS components")

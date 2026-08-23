@@ -4,6 +4,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+
 class ConfigError(ValueError):
     pass
 
@@ -49,6 +50,14 @@ def _string_list(value: Any, name: str) -> list[str]:
     return list(value)
 
 
+def _int_list(value: Any, name: str) -> list[int]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, int) and not isinstance(item, bool) for item in value):
+        raise ConfigError(f"{name} must be an array of integers")
+    return list(value)
+
+
 def _relative_path(value: Any, name: str, default: str) -> str:
     result = _string(value, name, default)
     candidate = Path(result)
@@ -62,5 +71,3 @@ def _positive(value: int, name: str, *, allow_zero: bool = False) -> int:
         qualifier = "zero or greater" if allow_zero else "greater than zero"
         raise ConfigError(f"{name} must be {qualifier}")
     return value
-
-
