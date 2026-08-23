@@ -18,8 +18,12 @@ from typing import Any, Callable
 from .logging import event
 
 
-TERMINAL_PHASES = {"verified", "manual_intervention_required"}
+TERMINAL_PHASES = {"verified", "manual_intervention_required", "resolved_without_install"}
 PENDING_VALIDATION_PHASES = {"candidate_installed", "awaiting_upstream_validation"}
+PREINSTALL_PHASES = {
+    "detected", "writers_stopped", "source_mounted_readonly", "candidate_building",
+    "candidate_built", "backup_created", "failed_preinstall",
+}
 PREINSTALL_RETRY_LIMIT = 2
 
 
@@ -245,15 +249,30 @@ class IndexRepairController:
             if item.get("phase") not in TERMINAL_PHASES
         })
         verified = sorted({int(item["volume_id"]) for item in transactions if item.get("phase") == "verified"})
+        resolved = sorted({
+            int(item["volume_id"]) for item in transactions
+            if item.get("phase") == "resolved_without_install"
+        })
         failed = sorted({
             int(item["volume_id"]) for item in transactions
             if item.get("phase") == "manual_intervention_required"
         })
         latest = max(transactions, key=lambda item: float(item.get("updated_at", 0)), default={})
+        latest_failure = max(
+            (
+                item for item in transactions
+                if item.get("failure_reason") and item.get("phase") != "resolved_without_install"
+            ),
+            key=lambda item: float(item.get("updated_at", 0)),
+            default={},
+        )
         counters = {
             "detected_total": len(transactions),
             "attempted_total": sum(1 for item in transactions if int(item.get("attempt_count", 0)) > 0),
             "succeeded_total": sum(1 for item in transactions if item.get("phase") == "verified"),
+            "resolved_without_install_total": sum(
+                1 for item in transactions if item.get("phase") == "resolved_without_install"
+            ),
             "failed_total": sum(1 for item in transactions if item.get("phase") == "manual_intervention_required"),
             "rolled_back_total": sum(1 for item in transactions if item.get("rolled_back")),
         }
@@ -264,8 +283,9 @@ class IndexRepairController:
             "pending_volume_ids": pending,
             "current_volume_id": self._current_volume_id,
             "verified_volume_ids": verified,
+            "resolved_without_install_volume_ids": resolved,
             "failed_volume_ids": failed,
-            "last_error": error or str(latest.get("failure_reason", "")),
+            "last_error": error or str(latest_failure.get("failure_reason", "")),
             "started_at": float(latest.get("created_at", 0)),
             "updated_at": float(latest.get("updated_at", 0)),
             "counters": counters,
@@ -285,12 +305,42 @@ class IndexRepairController:
                     transaction, "manual_intervention_required",
                     failure_reason=transaction.get("failure_reason", "candidate was rolled back"),
                 )
-            elif phase not in TERMINAL_PHASES and phase not in {
-                "detected", "writers_stopped", "source_mounted_readonly", "candidate_building",
-                "candidate_built", "backup_created", "failed_preinstall",
-            }:
+            elif phase not in TERMINAL_PHASES and phase not in PREINSTALL_PHASES:
                 self._manual(transaction, f"unknown crash-recovery phase: {phase}")
         self._publish("awaiting_upstream_validation" if self.has_awaiting_validation() else "idle")
+
+    def reconcile_resolved_preinstall(self, status: dict[str, Any]) -> list[int]:
+        """Close stale pre-install work after stable upstream status no longer requests it."""
+
+        details = {int(item["id"]): item for item in status.get("volume_details", [])}
+        unexpected = {int(item) for item in status.get("unexpected_readonly_volume_ids", [])}
+        resolved: list[int] = []
+        for transaction in self._transactions():
+            if transaction.get("phase") not in PREINSTALL_PHASES:
+                continue
+            volume_id = int(transaction["volume_id"])
+            if volume_id not in details or volume_id in unexpected:
+                continue
+            reason = "stable upstream status no longer reports this volume as unexpectedly read-only"
+            self.journal.transition(
+                transaction,
+                "resolved_without_install",
+                success=False,
+                candidate_installed=False,
+                resolution_reason=reason,
+                resolved_at=time.time(),
+            )
+            expected_staging = self.journal.staging_dir / str(transaction["transaction_id"])
+            staging = Path(str(transaction.get("staging_dir") or expected_staging))
+            if staging == expected_staging:
+                if staging.is_symlink():
+                    staging.unlink(missing_ok=True)
+                else:
+                    shutil.rmtree(staging, ignore_errors=True)
+            resolved.append(volume_id)
+        if resolved:
+            self._publish("idle")
+        return sorted(resolved)
 
     def _validate_installed_artifacts(self, transaction: dict[str, Any]) -> None:
         live_idx = Path(transaction["live_idx_path"])
@@ -521,7 +571,13 @@ class IndexRepairController:
             latest["operator_retry_consumed"] = True
             self.journal.save(latest)
 
-        attempts = max((int(item.get("attempt_count", 0)) for item in same_source), default=0)
+        attempts = max(
+            (
+                int(item.get("attempt_count", 0)) for item in same_source
+                if item.get("phase") != "resolved_without_install"
+            ),
+            default=0,
+        )
         if attempts >= PREINSTALL_RETRY_LIMIT and not retry_authorized:
             failed = [item for item in same_source if item.get("phase") == "failed_preinstall"]
             if failed:
@@ -574,10 +630,7 @@ class IndexRepairController:
         old_sdx = _hash_file(live_sdx) if live_sdx.is_file() else None
         resumable = [
             item for item in same_source
-            if item.get("phase") in {
-                "detected", "writers_stopped", "source_mounted_readonly", "candidate_building",
-                "candidate_built", "backup_created",
-            }
+            if item.get("phase") in PREINSTALL_PHASES - {"failed_preinstall"}
         ]
         if resumable:
             transaction = max(resumable, key=lambda item: float(item.get("updated_at", 0)))

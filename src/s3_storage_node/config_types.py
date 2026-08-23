@@ -58,7 +58,7 @@ class ApplianceConfig:
     full_probe_interval_seconds: int = 60
     probe_timeout_seconds: int = 4
     startup_timeout_seconds: int = 30
-    shutdown_grace_seconds: int = 20
+    shutdown_grace_seconds: int = 45
     recovery_initial_seconds: int = 5
     recovery_max_seconds: int = 60
     recovery_stability_seconds: int = 15

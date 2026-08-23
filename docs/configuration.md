@@ -24,7 +24,7 @@ The sample file at `config/config.toml.example` is the recommended starting poin
 | `full_probe_interval_seconds` | `60` | Full durability and S3-canary cadence while online |
 | `probe_timeout_seconds` | `4` | Deadline for a storage probe subprocess |
 | `startup_timeout_seconds` | `30` | Mount/helper and per-process startup deadline |
-| `shutdown_grace_seconds` | `20` | One global SeaweedFS drain deadline before hard-fence fallback |
+| `shutdown_grace_seconds` | `45` | One global SeaweedFS drain deadline before hard-fence fallback |
 | `recovery_initial_seconds` | `5` | Initial recovery retry delay |
 | `recovery_max_seconds` | `60` | Maximum exponential recovery delay |
 | `recovery_stability_seconds` | `15` | Minimum unchanged upstream volume-status interval at startup and healthy interval before readiness returns |
@@ -39,6 +39,8 @@ The sample file at `config/config.toml.example` is the recommended starting poin
 `worker_fencing_mode = "namespace"` runs the selected data mount and all SeaweedFS processes in private mount and network namespaces. It requires `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, usable IPv4 forwarding, and is mandatory for exclusive CIFS-to-SSHFS failover.
 
 `disabled` remains the parser default for compatibility, but it does not provide generation-level physical network fencing.
+
+The shutdown deadline is shared by the sequential S3, filer, volume-server, and master drain plus storage detach. The 45-second default accommodates SeaweedFS filer and volume heartbeat shutdown delays observed in production. A shorter deployment override can turn a healthy controlled repair stop into a hard fence and recovery loop; lower it only after timing the complete stack on that deployment.
 
 ## Storage targets
 
@@ -299,6 +301,8 @@ The guardian consumes SeaweedFS's own `ReadOnly` result and does not reproduce i
 Automatic repair requires `volume_health_enabled = true` and is enabled safely by default, including for existing configurations that omit the new settings. Concurrency defaults to one because scans read the complete remote `.dat` and can place sustained load on network storage. Increasing it does not weaken writer shutdown, source read-only exposure, backups, or upstream validation.
 
 There is no configuration for writing or truncating `.dat`, ignoring `weed fix` errors, skipping backups, accepting a missing volume, or bypassing upstream rejection.
+
+If the official `weed fix` candidate still references a malformed or truncated tail beyond `.dat` EOF, the candidate is rejected and the original indexes are restored. After independent operator certification, that volume may be listed in `expected_readonly_volume_ids` so the readable portion remains available intentionally. Never combine that exception with `weed fix -ignoreError`, and record the reason beside the deployment setting.
 
 ## `[s3]`
 

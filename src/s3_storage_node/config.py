@@ -79,7 +79,7 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         full_probe_interval_seconds=_int(appliance_raw.get("full_probe_interval_seconds"), "appliance.full_probe_interval_seconds", 60),
         probe_timeout_seconds=_int(appliance_raw.get("probe_timeout_seconds"), "appliance.probe_timeout_seconds", 4),
         startup_timeout_seconds=_int(appliance_raw.get("startup_timeout_seconds"), "appliance.startup_timeout_seconds", 30),
-        shutdown_grace_seconds=_int(appliance_raw.get("shutdown_grace_seconds"), "appliance.shutdown_grace_seconds", 20),
+        shutdown_grace_seconds=_int(appliance_raw.get("shutdown_grace_seconds"), "appliance.shutdown_grace_seconds", 45),
         recovery_initial_seconds=_int(appliance_raw.get("recovery_initial_seconds"), "appliance.recovery_initial_seconds", 5),
         recovery_max_seconds=_int(appliance_raw.get("recovery_max_seconds"), "appliance.recovery_max_seconds", 60),
         recovery_stability_seconds=_int(appliance_raw.get("recovery_stability_seconds"), "appliance.recovery_stability_seconds", 15),

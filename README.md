@@ -18,6 +18,7 @@ S3 Storage Node gives that storage an explicit safety boundary.
 - **Recovery requires end-to-end proof.** Storage identity, capacity, durable write/read/delete probes, upstream SeaweedFS volume status, authenticated S3 canaries, and a stability window must all pass before traffic reopens.
 - **CIFS may have an exclusive SSHFS recovery route.** Only one transport is selected for a generation. CIFS and SSHFS are never mounted as simultaneous writers and represent one storage failure domain, not two replicas.
 - **Metadata and indexes may be separated.** Bulk `.dat` files can live remotely while filer metadata and `.idx` files remain on fast persistent local storage.
+- **Damaged local indexes repair offline.** Unexpected read-only volumes trigger journaled reconstruction from an individually exposed read-only `.dat`, with original-index backups, atomic installation, upstream validation, and rollback on rejection.
 - **Health is observable.** JSON logs, readiness/liveness endpoints, Prometheus metrics, bounded generation outcomes and causes, index trust, SeaweedFS read-only volumes, selected transport, probe results, capacity, failures, and recoveries are exposed.
 
 This does not make a remote filesystem equivalent to an enterprise local disk array. It makes failure explicit and prevents the node from claiming success while its guarded storage path is unsafe.
