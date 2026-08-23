@@ -9,7 +9,9 @@ import pytest
 
 from s3_storage_node.generation import GenerationError, GenerationFactory, LocalWriterLease, WorkerGeneration
 from s3_storage_node.generation_guardian import Guardian
+from s3_storage_node.index_repair import IndexRepairError, IndexValidationRequired
 from s3_storage_node.render import render_haproxy
+from s3_storage_node.seaweed_health import UnexpectedReadonlyVolumes
 
 
 def test_local_writer_lease_is_exclusive(tmp_path: Path) -> None:
@@ -231,3 +233,64 @@ def test_fence_failure_is_fatal_and_reported(tmp_path: Path) -> None:
     assert snapshot["state"] == "FENCE_FAILED"
     assert snapshot["ready"] is False
     assert guardian.fatal_fence_failure is True
+
+
+def repair_status(*, readonly: bool) -> dict[str, object]:
+    return {
+        "unexpected_readonly_volume_ids": [23] if readonly else [],
+        "volume_details": [{
+            "id": 23,
+            "collection": "s3-orchestrator-data",
+            "readonly": readonly,
+            "expected_readonly": False,
+        }],
+    }
+
+
+def test_detected_readonly_volume_stops_writers_repairs_and_validates(tmp_path: Path) -> None:
+    guardian = make_guardian(tmp_path)
+    guardian.config.appliance.s3_canary_enabled = True
+    generation = Mock(generation=77)
+    guardian.generation = generation
+    controller = Mock()
+    controller.enabled = True
+    controller.validate_upstream.return_value = ([23], [])
+    controller.unresolved_unexpected.return_value = []
+    guardian.index_repair = controller
+    detected = repair_status(readonly=True)
+    repaired = repair_status(readonly=False)
+    guardian._start_seaweed = Mock(side_effect=[
+        UnexpectedReadonlyVolumes(detected),
+        IndexValidationRequired(repaired),
+    ])
+    guardian._stop_seaweed = Mock(return_value=True)
+    guardian._ensure_no_lingering_processes = Mock()
+    guardian._certify_indexes_from_result = Mock()
+    guardian._run_s3_canary = Mock()
+
+    guardian._start_seaweed_with_index_recovery()
+
+    guardian._stop_seaweed.assert_called_once()
+    controller.repair_detected.assert_called_once_with(
+        detected,
+        generation_id=77,
+        active_transport="",
+        generation_failure_cause="seaweed_volume_health_failure",
+    )
+    controller.validate_upstream.assert_called_once_with(repaired)
+    guardian._certify_indexes_from_result.assert_called_once_with(repaired)
+    guardian._run_s3_canary.assert_called_once()
+
+
+def test_repair_never_starts_when_a_writer_misses_shutdown_deadline(tmp_path: Path) -> None:
+    guardian = make_guardian(tmp_path)
+    controller = Mock()
+    controller.enabled = True
+    guardian.index_repair = controller
+    guardian._start_seaweed = Mock(side_effect=UnexpectedReadonlyVolumes(repair_status(readonly=True)))
+    guardian._stop_seaweed = Mock(return_value=False)
+
+    with pytest.raises(IndexRepairError, match="did not stop"):
+        guardian._start_seaweed_with_index_recovery()
+
+    controller.repair_detected.assert_not_called()

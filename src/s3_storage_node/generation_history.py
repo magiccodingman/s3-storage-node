@@ -94,8 +94,13 @@ class GenerationHistory:
             return "storage_failure"
         if name == "ProcessError":
             return "process_failure"
-        if name == "SeaweedHealthError":
+        if name in {"SeaweedHealthError", "UnexpectedReadonlyVolumes"}:
             return "seaweed_volume_health_failure"
+        if name in {
+            "IndexRepairError", "IndexRepairJournalError", "IndexRepairManualIntervention",
+            "IndexValidationRequired",
+        }:
+            return "seaweed_index_repair_failure"
         if name == "S3CheckError":
             return "s3_canary_failure"
         if phase in {"MOUNTING", "VERIFYING_STORAGE", "VERIFYING_TRANSPORTS"}:

@@ -14,7 +14,7 @@ from .logging import event
 from .processes import ManagedProcess, ProcessError, wait_for_tcp
 from .render import render_filer_toml, render_haproxy, render_s3_config
 from .s3check import run_canary
-from .seaweed_health import SeaweedHealthError, inspect_volume_status
+from .seaweed_health import UnexpectedReadonlyVolumes, inspect_volume_status
 from .storage import StorageError, prepare_barrier
 
 
@@ -297,10 +297,7 @@ class Guardian:
         self.health.set_seaweed_volumes(result)
         unexpected = result["unexpected_readonly_volume_ids"]
         if unexpected:
-            raise SeaweedHealthError(
-                "SeaweedFS reported unexpected read-only volumes: "
-                + ",".join(str(volume_id) for volume_id in unexpected)
-            )
+            raise UnexpectedReadonlyVolumes(result)
         return result
 
     def _stabilize_recovery(self) -> None:

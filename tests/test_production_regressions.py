@@ -20,6 +20,7 @@ def test_seaweedfs_release_is_pinned_to_4_44() -> None:
     assert digest in dockerfile
     assert "SEAWEEDFS_VERSION:-4.44" in compose
     assert digest in compose
+    assert "bindfs" in dockerfile
 
 
 def test_compose_grants_mount_cifs_required_capability() -> None:

@@ -5,6 +5,7 @@ import os
 import secrets
 import shutil
 import socket
+import struct
 import subprocess
 import time
 import uuid
@@ -335,6 +336,9 @@ directory = "volume-indexes"
 
 [seaweed]
 volume_directory = "volumes"
+auto_index_repair_enabled = true
+index_repair_concurrency = 1
+index_repair_timeout_seconds = 120
 master_port = 9333
 volume_port = 8080
 filer_port = 8888
@@ -548,10 +552,41 @@ def test_real_cifs_to_sshfs_chaos_failover(tmp_path: Path) -> None:
         _drop_smb(project, env)
         _wait_primary_failure(project, env)
         _compose(project, env, "kill", "-s", "KILL", "node", timeout=30)
+
+        # Model the ordering divergence a hard fence can leave behind: the
+        # authoritative remote .dat survives, while the local .idx contains a
+        # final entry whose referenced offset is far beyond EOF. The container
+        # is stopped here, so no SeaweedFS writer can race this fault injection.
+        index_root = Path(env["CHAOS_DIR"]) / "state" / "index" / "volume-indexes"
+        indexes = sorted(path for path in index_root.glob("*.idx") if path.stat().st_size >= 16)
+        assert indexes, "chaos workload did not create a repairable local index"
+        damaged_index = indexes[0]
+        damaged_volume_id = int(damaged_index.stem.rsplit("_", 1)[-1])
+        with damaged_index.open("ab") as handle:
+            handle.write(struct.pack(">QII", 0xFFFFFFFFFFFFFFFF, 0x3FFFFFFF, 100))
+
+        # The four-second deadline above deliberately exercises hard fencing
+        # during transport loss.  Give the subsequent repair generation a
+        # still-bounded deadline long enough for SeaweedFS's own shutdown path
+        # (the volume server alone can wait roughly ten seconds) so the test
+        # reaches the offline-only repair rather than repeatedly hard-fencing.
+        config_path = Path(env["CHAOS_DIR"]) / "config.toml"
+        config_text = config_path.read_text(encoding="utf-8")
+        assert "shutdown_grace_seconds = 4" in config_text
+        config_path.write_text(
+            config_text.replace("shutdown_grace_seconds = 4", "shutdown_grace_seconds = 25", 1),
+            encoding="utf-8",
+        )
+
         _compose(project, env, "up", "-d", "node", timeout=60)
         restarted_secondary = _wait_ready(health_port, "sshfs-secondary", timeout=300)
         assert int(restarted_secondary["generation"]["id"]) > primary_again_generation
         assert restarted_secondary["generation_history"]["counters"]["cause:guardian_restart_detected"] >= 1
+        repair = restarted_secondary["index_repair"]
+        assert repair["counters"]["succeeded_total"] >= 1
+        assert damaged_volume_id in repair["verified_volume_ids"]
+        repair_backups = index_root / ".s3-storage-node-repair" / "backups"
+        assert any(repair_backups.glob(f"*/{damaged_index.name}"))
         _assert_objects(s3_port, bucket, objects, access, secret)
         restart_key = "after-guardian-restart"
         objects[restart_key] = secrets.token_bytes(2 * 1024 * 1024)

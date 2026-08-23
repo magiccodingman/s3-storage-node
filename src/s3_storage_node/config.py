@@ -190,6 +190,15 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         expected_readonly_volume_ids=tuple(
             _int_list(seaweed_raw.get("expected_readonly_volume_ids"), "seaweed.expected_readonly_volume_ids")
         ),
+        auto_index_repair_enabled=_bool(
+            seaweed_raw.get("auto_index_repair_enabled"), "seaweed.auto_index_repair_enabled", True,
+        ),
+        index_repair_concurrency=_int(
+            seaweed_raw.get("index_repair_concurrency"), "seaweed.index_repair_concurrency", 1,
+        ),
+        index_repair_timeout_seconds=_int(
+            seaweed_raw.get("index_repair_timeout_seconds"), "seaweed.index_repair_timeout_seconds", 3600,
+        ),
     )
     for field_name in ("master_port", "volume_port", "filer_port", "s3_internal_port", "volume_size_limit_mb", "filer_max_mb"):
         _positive(getattr(seaweed, field_name), f"seaweed.{field_name}")
@@ -198,6 +207,12 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         raise ConfigError("seaweed.expected_readonly_volume_ids must contain positive volume IDs")
     if len(seaweed.expected_readonly_volume_ids) != len(set(seaweed.expected_readonly_volume_ids)):
         raise ConfigError("seaweed.expected_readonly_volume_ids must not contain duplicates")
+    _positive(seaweed.index_repair_concurrency, "seaweed.index_repair_concurrency")
+    _positive(seaweed.index_repair_timeout_seconds, "seaweed.index_repair_timeout_seconds")
+    if seaweed.index_repair_concurrency > 8:
+        raise ConfigError("seaweed.index_repair_concurrency may not exceed 8")
+    if seaweed.auto_index_repair_enabled and not seaweed.volume_health_enabled:
+        raise ConfigError("seaweed.auto_index_repair_enabled requires seaweed.volume_health_enabled")
 
     s3_raw = _table(raw, "s3")
     auth_mode = _string(s3_raw.get("auth_mode"), "s3.auth_mode", "static").lower()

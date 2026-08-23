@@ -14,9 +14,16 @@ from .generation import GenerationError, GenerationFactory, LocalWriterLease, Wo
 from .generation_history import GenerationHistory
 from .guardian import Guardian as BaseGuardian
 from .health import start_server
+from .index_repair import (
+    IndexRepairController,
+    IndexRepairError,
+    IndexRepairManualIntervention,
+    IndexValidationRequired,
+)
 from .logging import event
 from .processes import ManagedProcess, wait_for_tcp
 from .s3check import run_canary
+from .seaweed_health import UnexpectedReadonlyVolumes
 from .storage import StorageError, prepare_barrier
 
 
@@ -51,6 +58,7 @@ class Guardian(BaseGuardian):
         self.health.set_generation_history(self.generation_history.snapshot())
         self.generation: WorkerGeneration | None = None
         self.fatal_fence_failure = False
+        self.index_repair: IndexRepairController | None = None
 
     def run(self) -> int:
         self._install_signals()
@@ -75,7 +83,8 @@ class Guardian(BaseGuardian):
                     self._mount_and_enroll_targets()
                     self.health.set("VERIFYING_STORAGE", False, "performing storage durability probe")
                     self._probe_targets(full=True)
-                    self._start_seaweed()
+                    self._prepare_index_repair_offline()
+                    self._start_seaweed_with_index_recovery()
                     self._stabilize_recovery()
                     self.health.set("ONLINE", True, "all storage and SeaweedFS checks passed")
                     event("info", "appliance_online", generation=self.generation.generation if self.generation else 0)
@@ -366,9 +375,20 @@ class Guardian(BaseGuardian):
         )
 
     def _check_seaweed_volumes(self) -> dict[str, object]:
-        result = super()._check_seaweed_volumes()
+        try:
+            result = super()._check_seaweed_volumes()
+        except UnexpectedReadonlyVolumes as exc:
+            if self.index_repair is not None and self.index_repair.has_awaiting_validation():
+                raise IndexValidationRequired(exc.status) from exc
+            raise
         if not result:
             return result
+        if self.index_repair is not None and self.index_repair.has_awaiting_validation():
+            raise IndexValidationRequired(dict(result))
+        self._certify_indexes_from_result(result)
+        return result
+
+    def _certify_indexes_from_result(self, result: dict[str, object]) -> None:
         history = self.generation_history.snapshot()
         if not history["indexes_certified"]:
             self.generation_history.certify_indexes(
@@ -384,7 +404,71 @@ class Guardian(BaseGuardian):
         result = dict(result)
         result["orphan_deletion_safe"] = bool(history["indexes_certified"])
         self.health.set_seaweed_volumes(result)
-        return result
+
+    def _prepare_index_repair_offline(self) -> None:
+        if self.index_repair is None:
+            self.index_repair = IndexRepairController(
+                self.config,
+                self.health,
+                command_builder=lambda command: self._generation_command(command),
+            )
+        self.index_repair.prepare_offline()
+
+    def _start_seaweed_with_index_recovery(self) -> None:
+        try:
+            self._start_seaweed()
+            return
+        except IndexValidationRequired as required:
+            self._finish_index_validation(required.status)
+            return
+        except UnexpectedReadonlyVolumes as detected:
+            status = detected.status
+
+        if self.index_repair is None or not self.index_repair.enabled:
+            raise UnexpectedReadonlyVolumes(status)
+        self.health.set("REPAIRING_INDEXES", False, "stopping all SeaweedFS writers before index repair")
+        deadline = time.monotonic() + self.config.appliance.shutdown_grace_seconds
+        if not self._stop_seaweed(deadline=deadline):
+            raise IndexRepairError("SeaweedFS writers did not stop before the repair deadline")
+        self._ensure_no_lingering_processes()
+        generation_id = self.generation.generation if self.generation else 0
+        self.index_repair.repair_detected(
+            status,
+            generation_id=generation_id,
+            active_transport=str(getattr(self, "active_transport", "")),
+            generation_failure_cause="seaweed_volume_health_failure",
+        )
+        try:
+            self._start_seaweed()
+        except IndexValidationRequired as required:
+            self._finish_index_validation(required.status)
+            return
+        except UnexpectedReadonlyVolumes as detected_after_repair:
+            # A pending candidate normally converts this to IndexValidationRequired.
+            raise IndexRepairManualIntervention(str(detected_after_repair)) from detected_after_repair
+        raise IndexRepairError("repair candidates were installed without entering upstream validation")
+
+    def _finish_index_validation(self, status: dict[str, object]) -> None:
+        assert self.index_repair is not None
+        _verified, rejected = self.index_repair.validate_upstream(dict(status))
+        unresolved = self.index_repair.unresolved_unexpected(dict(status))
+        if rejected or unresolved:
+            reason_parts = []
+            if rejected:
+                reason_parts.append("candidate rejected for volume(s) " + ",".join(map(str, rejected)))
+            if unresolved:
+                reason_parts.append("unrepaired volume(s) " + ",".join(map(str, unresolved)))
+            reason = "; ".join(reason_parts)
+            deadline = time.monotonic() + self.config.appliance.shutdown_grace_seconds
+            if not self._stop_seaweed(deadline=deadline):
+                raise IndexRepairError("SeaweedFS writers did not stop before index rollback")
+            self._ensure_no_lingering_processes()
+            if rejected:
+                self.index_repair.rollback_rejected(rejected, reason)
+            raise IndexRepairManualIntervention(reason)
+        self._certify_indexes_from_result(dict(status))
+        if self.config.appliance.s3_canary_enabled:
+            self._run_s3_canary()
 
     def _start_seaweed(self) -> None:
         self.health.set("STARTING_SEAWEED", False, "starting SeaweedFS components")
@@ -398,6 +482,7 @@ class Guardian(BaseGuardian):
         for process, port in zip(self.processes, ports, strict=True):
             process.start()
             wait_for_tcp(self._worker_endpoint_host(), port, self.config.appliance.startup_timeout_seconds, process)
+        self._check_seaweed_volumes()
         if self.config.appliance.s3_canary_enabled:
             self._run_s3_canary()
 

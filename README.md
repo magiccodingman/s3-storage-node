@@ -72,7 +72,7 @@ SSHFS is recovery-only. The canonical data target remains CIFS, namespace fencin
 - `CAP_SYS_ADMIN` for appliance-managed mounts and namespace entry
 - `CAP_NET_ADMIN` for worker-generation veth fencing
 - AppArmor allowance for mounting; the supplied Compose configuration uses `apparmor=unconfined`
-- A usable host `/dev/fuse`; the standard Compose file maps it so SSHFS recovery requires no overlay
+- A usable host `/dev/fuse`; the standard Compose file maps it for read-only index-repair projection and SSHFS recovery
 - An already formatted filesystem and explicit Docker device mapping for block devices
 
 The image includes SeaweedFS, `mount.cifs`, SSHFS, HAProxy, filesystem tools, and the guardian, and is published for `linux/amd64` and `linux/arm64`.
@@ -240,9 +240,11 @@ Restoring CIFS does not cause automatic failback.
 2. SeaweedFS shutdown is attempted in reverse dependency order under one global deadline.
 3. If writers exit, the active storage route is cleanly detached before physical fencing.
 4. If drain or detach fails, the worker is hard-fenced immediately and its indexes are marked suspect.
-5. A failed transport is persisted and the next eligible exclusive transport is selected after recovery backoff.
-6. Storage identity, capacity, full durability probes, SeaweedFS volume status, S3 canaries, and the recovery stability window must pass.
-7. Readiness returns to `200` and HAProxy reopens traffic.
+5. A replacement generation uses upstream `/status` to identify unexpected read-only volumes. It stops every SeaweedFS writer, reconstructs only those `.idx` files from individually exposed read-only authoritative `.dat` inputs, and retains rollback backups.
+6. Rebuilt candidates must be present and writable in upstream `/status`; rejected candidates are rolled back and blocked from automatic loops.
+7. A failed transport is persisted and the next eligible exclusive transport is selected after recovery backoff.
+8. Storage identity, capacity, full durability probes, SeaweedFS volume status, S3 canaries, and the recovery stability window must pass.
+9. Readiness returns to `200` and HAProxy reopens traffic.
 
 Readiness always closes immediately. The physical fence remains mandatory before replacement, while a bounded drain avoids cutting the remote data path before SeaweedFS has had a chance to finish shutdown.
 
