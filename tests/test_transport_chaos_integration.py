@@ -121,6 +121,14 @@ def _wait_ready(port: int, transport: str, *, timeout: float = 240) -> dict[str,
         details = storage.get("transport:data", {})
         if not isinstance(details, dict) or details.get("active_transport") != transport:
             return None
+        volumes = snapshot.get("seaweed_volumes", {})
+        if not isinstance(volumes, dict) or not volumes.get("checked"):
+            return None
+        if volumes.get("unexpected_readonly") != 0:
+            return None
+        history = snapshot.get("generation_history", {})
+        if not isinstance(history, dict) or not history.get("indexes_certified"):
+            return None
         return snapshot
 
     return _wait(ready, f"ready state on {transport}", timeout=timeout)
@@ -492,6 +500,8 @@ def test_real_cifs_to_sshfs_chaos_failover(tmp_path: Path) -> None:
         secondary_generation = int(secondary["generation"]["id"])
         assert secondary_generation > primary_generation
         assert secondary["storage"]["data"]["sentinel_version"] == 2
+        assert secondary["generation_history"]["counters"]["cause:storage_failure"] >= 1
+        assert secondary["seaweed_volumes"]["orphan_deletion_safe"] is True
         _assert_objects(s3_port, bucket, objects, access, secret)
         after_key = "after-sshfs"
         objects[after_key] = secrets.token_bytes(2 * 1024 * 1024)
@@ -541,6 +551,7 @@ def test_real_cifs_to_sshfs_chaos_failover(tmp_path: Path) -> None:
         _compose(project, env, "up", "-d", "node", timeout=60)
         restarted_secondary = _wait_ready(health_port, "sshfs-secondary", timeout=300)
         assert int(restarted_secondary["generation"]["id"]) > primary_again_generation
+        assert restarted_secondary["generation_history"]["counters"]["cause:guardian_restart_detected"] >= 1
         _assert_objects(s3_port, bucket, objects, access, secret)
         restart_key = "after-guardian-restart"
         objects[restart_key] = secrets.token_bytes(2 * 1024 * 1024)

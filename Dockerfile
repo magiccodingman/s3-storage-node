@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
-ARG SEAWEEDFS_VERSION=4.40
-FROM chrislusf/seaweedfs:${SEAWEEDFS_VERSION} AS seaweedfs
+ARG SEAWEEDFS_VERSION=4.44
+ARG SEAWEEDFS_DIGEST=sha256:e67e8c385484120b78bff47ba5f4debbca47fbd27ed1a39f016f47e8baea615b
+FROM chrislusf/seaweedfs:${SEAWEEDFS_VERSION}@${SEAWEEDFS_DIGEST} AS seaweedfs
 
 FROM debian:13.6-slim
 ARG APP_VERSION=dev

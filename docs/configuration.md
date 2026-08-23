@@ -24,7 +24,7 @@ The sample file at `config/config.toml.example` is the recommended starting poin
 | `full_probe_interval_seconds` | `60` | Full durability and S3-canary cadence while online |
 | `probe_timeout_seconds` | `4` | Deadline for a storage probe subprocess |
 | `startup_timeout_seconds` | `30` | Mount/helper and per-process startup deadline |
-| `shutdown_grace_seconds` | `20` | Grace period before a child process receives `SIGKILL` |
+| `shutdown_grace_seconds` | `20` | One global SeaweedFS drain deadline before hard-fence fallback |
 | `recovery_initial_seconds` | `5` | Initial recovery retry delay |
 | `recovery_max_seconds` | `60` | Maximum exponential recovery delay |
 | `recovery_stability_seconds` | `15` | Minimum healthy interval before readiness returns |
@@ -275,6 +275,8 @@ The selected target becomes SeaweedFS `-dir.idx`. Indexes must remain persistent
 | `rack` | empty | SeaweedFS topology label |
 | `disk_type` | empty | SeaweedFS disk label |
 | `encrypt_volume_data` | `false` | Enable SeaweedFS volume encryption |
+| `volume_health_enabled` | `true` | Require the upstream volume-server `/status` check before and during readiness |
+| `expected_readonly_volume_ids` | `[]` | Explicit volume IDs whose SeaweedFS `ReadOnly` state is intentionally accepted |
 
 Raw argument arrays are available:
 
@@ -288,6 +290,8 @@ s3_extra_args = []
 Guardian-owned bind addresses, internal dependencies, data paths, index paths, filer-store paths, and other safety-critical arguments cannot be overridden through these arrays.
 
 The bundled appliance supervises one volume server. Keep `default_replication = "000"` unless the deployment has deliberately added and independently managed enough volume servers to satisfy another placement.
+
+The guardian consumes SeaweedFS's own `ReadOnly` result and does not reproduce its volume-full, sealed, or disk-pressure rules. An upstream read-only ID is unexpected unless it is explicitly listed. Keep the list empty for new deployments. Add an ID only after independent operator certification; never use the list to suppress an index-integrity incident.
 
 ## `[s3]`
 

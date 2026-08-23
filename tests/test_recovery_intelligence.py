@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from s3_storage_node.guardian import Guardian
+from s3_storage_node.seaweed_health import SeaweedHealthError
 from s3_storage_node.storage import StorageError
 
 
@@ -88,3 +89,26 @@ def test_probe_health_tracks_success_and_failure() -> None:
     snapshot = guardian.health.snapshot()
     assert snapshot["consecutive_probe_successes"] == 0
     assert snapshot["last_failure"] == "dead mount"
+
+
+def test_unexpected_upstream_readonly_volume_fails_health(monkeypatch: pytest.MonkeyPatch) -> None:
+    guardian = make_guardian()
+    guardian.config.seaweed.volume_health_enabled = True
+    guardian.config.seaweed.expected_readonly_volume_ids = ()
+    monkeypatch.setattr(
+        "s3_storage_node.guardian.inspect_volume_status",
+        lambda *_args, **_kwargs: {
+            "checked": True,
+            "total": 4,
+            "readonly": 3,
+            "writable": 1,
+            "unexpected_readonly": 3,
+            "unexpected_readonly_volume_ids": [21, 22, 23],
+            "collections": {"data": {"total": 4, "readonly": 3, "writable": 1}},
+        },
+    )
+
+    with pytest.raises(SeaweedHealthError, match="21,22,23"):
+        guardian._check_seaweed_volumes()
+
+    assert guardian.health.snapshot()["seaweed_volumes"]["unexpected_readonly"] == 3

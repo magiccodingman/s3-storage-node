@@ -100,7 +100,7 @@ class Guardian(GenerationGuardian):
         })
         self.health.set_generation(generation)
 
-    def _run_helper(self, operation: str, target_name: str | None = None, *, full: bool = False, timeout: int) -> dict[str, object]:
+    def _run_helper(self, operation: str, target_name: str | None = None, *, full: bool = False, timeout: float) -> dict[str, object]:
         try:
             return super()._run_helper(operation, target_name, full=full, timeout=timeout)
         except Exception:
@@ -188,16 +188,16 @@ class Guardian(GenerationGuardian):
             self._publish_transport()
         return fenced
 
-    def _repair_targets(self, unmount_all: bool = False) -> None:
+    def _repair_targets(self, unmount_all: bool = False, *, timeout_seconds: float | None = None) -> bool:
         if self._controlled_transport_detached and not unmount_all:
             self._controlled_transport_detached = False
-            return
+            return True
         previous = os.environ.get("S3_STORAGE_NODE_TRANSPORT")
         repair_transport = self._transport_failure_name or self.active_transport
         if repair_transport:
             os.environ["S3_STORAGE_NODE_TRANSPORT"] = repair_transport
         try:
-            super()._repair_targets(unmount_all=unmount_all)
+            return super()._repair_targets(unmount_all=unmount_all, timeout_seconds=timeout_seconds)
         finally:
             if previous is None:
                 os.environ.pop("S3_STORAGE_NODE_TRANSPORT", None)
@@ -210,27 +210,6 @@ class Guardian(GenerationGuardian):
             super()._online_loop()
         finally:
             self._online_transport_watch = False
-
-    def _drain_controlled_transport(self, requested: str) -> None:
-        self._stop_seaweed()
-        if self.lingering_processes:
-            event(
-                "warning", "storage_transport_drain_incomplete",
-                current=self.active_transport, requested=requested,
-                processes=",".join(process.name for process in self.lingering_processes),
-            )
-            return
-        try:
-            self._run_helper("unmount", self.failover.target, timeout=self.config.appliance.startup_timeout_seconds)
-        except Exception as exc:
-            event(
-                "error", "storage_transport_detach_failed",
-                current=self.active_transport, requested=requested, error=str(exc),
-            )
-            return
-        self._controlled_transport_detached = True
-        event("info", "storage_detached", target=self.failover.target)
-        event("info", "storage_transport_drained", current=self.active_transport, requested=requested)
 
     def _interruptible_sleep(self, seconds: float) -> None:
         if not self._online_transport_watch or self.transport_selector is None:
@@ -245,7 +224,6 @@ class Guardian(GenerationGuardian):
                     "warning", "storage_transport_switch_requested",
                     current=self.active_transport, requested=requested,
                 )
-                self._drain_controlled_transport(requested)
                 raise TransportSwitchRequested(f"operator requested transport switch to {requested}")
             remaining = deadline - time.monotonic()
             if remaining <= 0:

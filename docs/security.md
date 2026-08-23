@@ -94,7 +94,7 @@ CIFS and SSHFS recovery routes are never mounted as simultaneous writers. Every 
 
 A controlled switch withdraws public readiness before draining and detaching the current transport. The old generation is then physically fenced before a replacement generation mounts the requested route.
 
-An unexpected storage failure is fence-first. This prevents a failed generation from reconnecting while recovery starts elsewhere.
+An unexpected storage failure withdraws readiness immediately and receives one bounded chance to drain while the data route still exists. The route is physically fenced after clean detach or immediately when drain/detach cannot complete. Recovery never starts a replacement before that fence is verified.
 
 The selector state and generation counter are stored under the persistent appliance state directory and protected by a local exclusive writer lock.
 

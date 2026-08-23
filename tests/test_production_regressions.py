@@ -12,6 +12,16 @@ from s3_storage_node.s3check import S3CheckError, run_canary
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_seaweedfs_release_is_pinned_to_4_44() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    compose = (ROOT / "docker-compose.yml").read_text()
+    digest = "sha256:e67e8c385484120b78bff47ba5f4debbca47fbd27ed1a39f016f47e8baea615b"
+    assert "ARG SEAWEEDFS_VERSION=4.44" in dockerfile
+    assert digest in dockerfile
+    assert "SEAWEEDFS_VERSION:-4.44" in compose
+    assert digest in compose
+
+
 def test_compose_grants_mount_cifs_required_capability() -> None:
     compose = (ROOT / "docker-compose.yml").read_text()
     assert "- SYS_ADMIN" in compose

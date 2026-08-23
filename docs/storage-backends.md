@@ -87,6 +87,8 @@ The profile has strict boundaries:
 
 The guardian supplies strict host-key checking, batch authentication, reconnect and keepalive settings, synchronous SSHFS writes, guarded cache behavior, FUSE permission controls, UID/GID mapping, and umask. Only a small performance-tuning allowlist is exposed through `mount_options`.
 
+Teardown first verifies that SeaweedFS writers stopped, then attempts a normal FUSE unmount. Lazy detach is used only after the clean unmount fails or times out; SSHFS receives `SIGTERM` after detach and `SIGKILL` only as the final bounded escape hatch.
+
 The private key is copied from the read-only secret into the ephemeral runtime directory with mode `0600`; the original secret is not changed. `/dev/fuse` and the SSH secrets are supplied through `docker-compose.sshfs.yml`.
 
 SSHFS acknowledgement still does not prove remote physical-media persistence. The appliance certifies the filesystem semantics visible to its process and does not claim stronger durability than the remote service provides.

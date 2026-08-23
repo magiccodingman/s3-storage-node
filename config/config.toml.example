@@ -118,6 +118,12 @@ data_center = ""
 rack = ""
 disk_type = ""
 encrypt_volume_data = false
+# SeaweedFS /status is authoritative for the volume ReadOnly bit. Keep this
+# enabled so readiness closes on any read-only volume not explicitly accepted.
+volume_health_enabled = true
+# Only list volume IDs whose upstream ReadOnly state is intentionally accepted.
+# Do not add an ID merely to restore readiness after an integrity warning.
+expected_readonly_volume_ids = []
 master_extra_args = []
 volume_extra_args = []
 filer_extra_args = []

@@ -416,6 +416,7 @@ class GenerationFactory:
         self.state_dir = state_dir
         self.runtime_dir = runtime_dir
         self.counter_path = state_dir / "generation-counter"
+        self.last_allocated_generation = 0
 
     def create(
         self,
@@ -427,6 +428,7 @@ class GenerationFactory:
         run_command: RunCommand = _run,
     ) -> WorkerGeneration:
         generation = self._next_generation()
+        self.last_allocated_generation = generation
         instance = WorkerGeneration(
             generation=generation,
             token=secrets.token_hex(16),

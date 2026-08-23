@@ -159,16 +159,20 @@ def test_manual_switch_drains_and_detaches_before_fence(tmp_path: Path) -> None:
     guardian = Guardian(make_config(tmp_path), str(config_path))
     guardian.generation_factory.create = Mock(side_effect=[fake_generation(1), fake_generation(2)])
     order: list[str] = []
-    guardian._stop_seaweed = Mock(side_effect=lambda: order.append("drain"))
+    guardian._stop_seaweed = Mock(side_effect=lambda **_kwargs: order.append("drain") or True)
     guardian._run_helper = Mock(side_effect=lambda *args, **kwargs: order.append("unmount") or {})
     guardian._begin_generation()
     guardian.transport_selector.request("sshfs-secondary")
     guardian._online_transport_watch = True
     with pytest.raises(TransportSwitchRequested):
         guardian._interruptible_sleep(1)
+    assert order == []
+    assert guardian._terminate_generation(
+        "operator requested transport switch to sshfs-secondary",
+        cause="operator_transport_switch",
+        phase="ONLINE",
+    ) is True
     assert order == ["drain", "unmount"]
-    assert guardian._fence_generation("operator requested transport switch") is True
-    guardian._repair_targets()
     guardian._run_helper.assert_called_once()
 
 

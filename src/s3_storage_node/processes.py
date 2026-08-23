@@ -45,6 +45,11 @@ class ManagedProcess:
         )
 
     def stop(self, grace_seconds: int) -> bool:
+        return self.stop_until(time.monotonic() + grace_seconds)
+
+    def stop_until(self, deadline: float) -> bool:
+        """Stop within a caller-owned global deadline."""
+
         if not self.process or self.process.poll() is not None:
             return True
         event("info", "process_stopping", process=self.name, pid=self.process.pid)
@@ -53,7 +58,7 @@ class ManagedProcess:
         except ProcessLookupError:
             return True
         try:
-            self.process.wait(timeout=grace_seconds)
+            self.process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             event("warning", "process_killing", process=self.name, pid=self.process.pid)
             try:
@@ -61,7 +66,7 @@ class ManagedProcess:
             except ProcessLookupError:
                 pass
             try:
-                self.process.wait(timeout=5)
+                self.process.wait(timeout=max(0.0, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
                 event("error", "process_stuck", process=self.name, pid=self.process.pid)
                 return False

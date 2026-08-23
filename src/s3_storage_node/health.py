@@ -25,6 +25,20 @@ class HealthState:
         self.recovery_stable_since = 0.0
         self.writer: dict[str, Any] = {"scope": "local", "held": False}
         self.generation: dict[str, Any] = {"id": 0, "mode": "disabled", "state": "none", "fenced": True}
+        self.generation_history: dict[str, Any] = {
+            "indexes_certified": True,
+            "counters": {},
+            "recent": [],
+        }
+        self.seaweed_volumes: dict[str, Any] = {
+            "checked": False,
+            "total": 0,
+            "readonly": 0,
+            "writable": 0,
+            "unexpected_readonly": 0,
+            "orphan_deletion_safe": False,
+            "collections": {},
+        }
 
     def set(self, state: str, ready: bool, reason: str = "") -> None:
         with self._lock:
@@ -61,6 +75,14 @@ class HealthState:
         with self._lock:
             self.generation = dict(values)
 
+    def set_generation_history(self, values: dict[str, Any]) -> None:
+        with self._lock:
+            self.generation_history = dict(values)
+
+    def set_seaweed_volumes(self, values: dict[str, Any]) -> None:
+        with self._lock:
+            self.seaweed_volumes = dict(values)
+
     def increment_failure(self) -> int:
         with self._lock:
             self.failures_total += 1
@@ -90,6 +112,8 @@ class HealthState:
                 "recovery_stable_since": self.recovery_stable_since,
                 "writer": self.writer,
                 "generation": self.generation,
+                "generation_history": self.generation_history,
+                "seaweed_volumes": self.seaweed_volumes,
             }
 
 
@@ -149,7 +173,50 @@ class Handler(BaseHTTPRequestHandler):
             f"s3_storage_node_generation {snapshot['generation'].get('id', 0)}",
             "# TYPE s3_storage_node_generation_fenced gauge",
             f"s3_storage_node_generation_fenced {1 if snapshot['generation'].get('fenced') else 0}",
+            "# TYPE s3_storage_node_indexes_certified gauge",
+            f"s3_storage_node_indexes_certified {1 if snapshot['generation_history'].get('indexes_certified') else 0}",
+            "# TYPE s3_storage_node_seaweed_volume_total gauge",
+            f"s3_storage_node_seaweed_volume_total {snapshot['seaweed_volumes'].get('total', 0)}",
+            "# TYPE s3_storage_node_seaweed_volume_readonly gauge",
+            f"s3_storage_node_seaweed_volume_readonly {snapshot['seaweed_volumes'].get('readonly', 0)}",
+            "# TYPE s3_storage_node_seaweed_volume_writable gauge",
+            f"s3_storage_node_seaweed_volume_writable {snapshot['seaweed_volumes'].get('writable', 0)}",
+            "# TYPE s3_storage_node_seaweed_volume_unexpected_readonly gauge",
+            f"s3_storage_node_seaweed_volume_unexpected_readonly {snapshot['seaweed_volumes'].get('unexpected_readonly', 0)}",
+            "# TYPE s3_storage_node_orphan_deletion_safe gauge",
+            f"s3_storage_node_orphan_deletion_safe {1 if snapshot['seaweed_volumes'].get('orphan_deletion_safe') else 0}",
         ]
+        generation_counters = snapshot["generation_history"].get("counters", {})
+        generation_metrics = {
+            "generations_created_total": "s3_storage_node_generations_created_total",
+            "generations_completed_total": "s3_storage_node_generations_completed_total",
+            "clean_shutdowns_total": "s3_storage_node_generation_clean_shutdowns_total",
+            "unclean_shutdowns_total": "s3_storage_node_generation_unclean_shutdowns_total",
+            "verified_fences_total": "s3_storage_node_generation_verified_fences_total",
+            "unverified_fences_total": "s3_storage_node_generation_unverified_fences_total",
+            "index_certifications_total": "s3_storage_node_index_certifications_total",
+        }
+        for name, metric in generation_metrics.items():
+            lines.append(f"{metric} {generation_counters.get(name, 0)}")
+        for name, value in generation_counters.items():
+            if not name.startswith("cause:"):
+                continue
+            cause = self._label(name.split(":", 1)[1])
+            lines.append(f's3_storage_node_generation_cause_total{{cause="{cause}"}} {value}')
+        for collection, values in snapshot["seaweed_volumes"].get("collections", {}).items():
+            label = self._label(collection)
+            lines.append(
+                f's3_storage_node_seaweed_collection_volumes{{collection="{label}",state="total"}} '
+                f'{values.get("total", 0)}'
+            )
+            lines.append(
+                f's3_storage_node_seaweed_collection_volumes{{collection="{label}",state="readonly"}} '
+                f'{values.get("readonly", 0)}'
+            )
+            lines.append(
+                f's3_storage_node_seaweed_collection_volumes{{collection="{label}",state="writable"}} '
+                f'{values.get("writable", 0)}'
+            )
         for name, values in snapshot["storage"].items():
             target = self._label(name)
             if "free_bytes" in values:
