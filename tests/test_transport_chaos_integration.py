@@ -335,6 +335,9 @@ directory = "volume-indexes"
 
 [seaweed]
 volume_directory = "volumes"
+auto_index_repair_enabled = true
+index_repair_concurrency = 1
+index_repair_timeout_seconds = 120
 master_port = 9333
 volume_port = 8080
 filer_port = 8888
@@ -475,13 +478,18 @@ def test_real_cifs_to_sshfs_chaos_failover(tmp_path: Path) -> None:
         # timeout must become a transport failure, readiness must be withdrawn,
         # and the generation veth must be absent before SSHFS recovery starts.
         _drop_smb(project, env)
-        _wait_primary_failure(project, env)
         unavailable = _wait(
-            lambda: (snapshot := _health(health_port)) and not snapshot.get("ready") and snapshot,
+            lambda: (
+                (snapshot := _health(health_port))
+                and not snapshot.get("ready")
+                and int(snapshot["generation"]["id"]) == primary_generation
+                and snapshot
+            ),
             "readiness withdrawal after CIFS loss",
             timeout=60,
         )
         assert int(unavailable["generation"]["id"]) == primary_generation
+        _wait_primary_failure(project, env)
         link = _compose(
             project,
             env,
@@ -548,10 +556,91 @@ def test_real_cifs_to_sshfs_chaos_failover(tmp_path: Path) -> None:
         _drop_smb(project, env)
         _wait_primary_failure(project, env)
         _compose(project, env, "kill", "-s", "KILL", "node", timeout=30)
+
+        # Model the ordering divergence a hard fence can leave behind: the
+        # authoritative remote .dat survives, while the local .idx contains a
+        # final entry whose referenced offset is far beyond EOF. The container
+        # is stopped here, so no SeaweedFS writer can race this fault injection.
+        # Use a one-shot container with the same state mount because its
+        # root-owned contents are not readable by the GitHub runner account.
+        # Its entrypoint is only this bounded mutation; it starts no guardian or
+        # SeaweedFS component and exits before recovery begins.
+        node_image = _compose(project, env, "images", "-q", "node").stdout.strip().splitlines()[-1]
+        injection = _run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--read-only",
+                "-v",
+                f"{env['CHAOS_DIR']}/state:/var/lib/s3-storage-node",
+                "--entrypoint",
+                "python3",
+                node_image,
+                "-c",
+                (
+                    "import json, os, pathlib, struct, sys; "
+                    "root=pathlib.Path(sys.argv[1]); bucket=sys.argv[2]; "
+                    "indexes=sorted(root.glob(f'{bucket}_*.idx')); "
+                    "assert indexes, f'no workload index under {root}'; "
+                    "path=indexes[0]; "
+                    "handle=path.open('ab'); "
+                    "handle.write(struct.pack('>QII', 0xffffffffffffffff, 0x3fffffff, 100)); "
+                    "handle.flush(); os.fsync(handle.fileno()); handle.close(); "
+                    "print(json.dumps({'name': path.name, "
+                    "'volume_id': int(path.stem.rsplit('_', 1)[-1])}))"
+                ),
+                "/var/lib/s3-storage-node/index/volume-indexes",
+                bucket,
+            ],
+            timeout=60,
+        )
+        injected = json.loads(injection.stdout.strip().splitlines()[-1])
+        damaged_index_name = str(injected["name"])
+        damaged_volume_id = int(injected["volume_id"])
+
+        # The four-second deadline above deliberately exercises hard fencing
+        # during transport loss.  Give the subsequent repair generation a
+        # still-bounded deadline long enough for SeaweedFS's own shutdown path
+        # (the volume server alone can wait roughly ten seconds) so the test
+        # reaches the offline-only repair rather than repeatedly hard-fencing.
+        config_path = Path(env["CHAOS_DIR"]) / "config.toml"
+        config_text = config_path.read_text(encoding="utf-8")
+        assert "shutdown_grace_seconds = 4" in config_text
+        config_path.write_text(
+            config_text.replace("shutdown_grace_seconds = 4", "shutdown_grace_seconds = 25", 1),
+            encoding="utf-8",
+        )
+
         _compose(project, env, "up", "-d", "node", timeout=60)
         restarted_secondary = _wait_ready(health_port, "sshfs-secondary", timeout=300)
         assert int(restarted_secondary["generation"]["id"]) > primary_again_generation
         assert restarted_secondary["generation_history"]["counters"]["cause:guardian_restart_detected"] >= 1
+        repair = restarted_secondary["index_repair"]
+        assert repair["counters"]["succeeded_total"] >= 1
+        assert damaged_volume_id in repair["verified_volume_ids"]
+        backup_check = _compose(
+            project,
+            env,
+            "exec",
+            "-T",
+            "node",
+            "python3",
+            "-c",
+            (
+                "import pathlib, sys; "
+                "root=pathlib.Path(sys.argv[1]); name=sys.argv[2]; "
+                "matches=list(root.glob(f'*/{name}')); "
+                "raise SystemExit(0 if matches else 1)"
+            ),
+            "/var/lib/s3-storage-node/index/volume-indexes/.s3-storage-node-repair/backups",
+            damaged_index_name,
+            check=False,
+            timeout=30,
+        )
+        assert backup_check.returncode == 0, "automatic repair did not retain the old index backup"
         _assert_objects(s3_port, bucket, objects, access, secret)
         restart_key = "after-guardian-restart"
         objects[restart_key] = secrets.token_bytes(2 * 1024 * 1024)

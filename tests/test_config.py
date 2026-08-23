@@ -64,6 +64,10 @@ def test_loads_valid_path_configuration(tmp_path: Path) -> None:
     assert config.volume_path == tmp_path / "state" / "data" / "volumes"
     assert config.metadata_path == tmp_path / "state" / "meta" / "filer"
     assert config.index_path == tmp_path / "state" / "index" / "volume-indexes"
+    assert config.index_repair_path == config.index_path / ".s3-storage-node-repair"
+    assert config.seaweed.auto_index_repair_enabled is True
+    assert config.seaweed.index_repair_concurrency == 1
+    assert config.seaweed.index_repair_timeout_seconds == 3600
 
 
 def test_data_sentinel_is_required(tmp_path: Path) -> None:
@@ -227,4 +231,30 @@ def test_expected_readonly_volume_ids_are_validated(tmp_path: Path, value: str) 
         data=tmp_path / "state/data", meta=tmp_path / "state/meta", index=tmp_path / "state/index",
     ).replace("[seaweed]", f"[seaweed]\nexpected_readonly_volume_ids = {value}")
     with pytest.raises(ConfigError, match="expected_readonly_volume_ids"):
+        load_config(write_config(tmp_path, text))
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("index_repair_concurrency", "0"),
+        ("index_repair_concurrency", "9"),
+        ("index_repair_timeout_seconds", "0"),
+    ],
+)
+def test_index_repair_bounds_are_validated(tmp_path: Path, setting: str, value: str) -> None:
+    text = BASE.format(
+        state=tmp_path / "state", runtime=tmp_path / "runtime",
+        data=tmp_path / "state/data", meta=tmp_path / "state/meta", index=tmp_path / "state/index",
+    ).replace("[seaweed]", f"[seaweed]\n{setting} = {value}")
+    with pytest.raises(ConfigError, match=setting):
+        load_config(write_config(tmp_path, text))
+
+
+def test_automatic_repair_requires_upstream_volume_health(tmp_path: Path) -> None:
+    text = BASE.format(
+        state=tmp_path / "state", runtime=tmp_path / "runtime",
+        data=tmp_path / "state/data", meta=tmp_path / "state/meta", index=tmp_path / "state/index",
+    ).replace("[seaweed]", "[seaweed]\nvolume_health_enabled = false")
+    with pytest.raises(ConfigError, match="auto_index_repair_enabled requires"):
         load_config(write_config(tmp_path, text))

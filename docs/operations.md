@@ -175,6 +175,46 @@ The `seaweed_volumes` field in `/healthz` is populated directly from the volume 
 
 Only add an expected ID after independently proving that its read-only lifecycle is intentional. Do not add an ID to hide an index-integrity error. When `indexes_certified=false`, orphan reports may be inspected, but destructive orphan/fsck application is prohibited. `orphan_deletion_safe` becomes true only after the upstream volume check recertifies the generation.
 
+### Automatic index reconstruction
+
+Unexpected upstream `ReadOnly` volumes trigger reconstruction only while readiness is already withdrawn. The guardian records their exact IDs and collections, stops the complete SeaweedFS stack, verifies the writers are gone, and reconstructs each local `.idx` from its authoritative remote `.dat`. It never scans every healthy volume.
+
+The source is fingerprinted before and after reconstruction using dataset identity, active transport, collection, volume ID, size, modification time, and bounded head/tail hashes. A changed fingerprint aborts before live installation. `weed fix` runs as the SeaweedFS UID/GID against an individually mounted read-only view; `-ignoreError` and `-remoteFile` are never used.
+
+Persistent state is stored beneath:
+
+```text
+<index path>/.s3-storage-node-repair/
+├── journal/
+├── staging/
+└── backups/
+```
+
+The original `.idx` and any `.sdx` are hash-verified and retained before atomic replacement. `.sdx` is derived sorted-index state and is removed after backup so SeaweedFS cannot reuse it with the rebuilt `.idx`. Repair backups are not automatically pruned.
+
+After restart, each target must be present in `/status` with `ReadOnly=false`. A rejected or missing target causes another complete writer stop, restoration of that volume's original `.idx` and `.sdx`, and a persistent manual-intervention block. A complete record beyond the old index is normally recovered. An incomplete final record may produce no valid candidate or may still be rejected by the volume server; the appliance never truncates the `.dat` to make it load.
+
+Inspect repair state without changing it:
+
+```bash
+docker compose exec s3-storage-node \
+  s3-storage-node index-repair status --config /etc/s3-storage-node/config.toml
+```
+
+Authorize one new guarded attempt after investigating a blocked fingerprint:
+
+```bash
+docker compose exec s3-storage-node \
+  s3-storage-node index-repair retry --volume-id 64 \
+  --config /etc/s3-storage-node/config.toml
+```
+
+Retry authorization does not run `weed fix` immediately and bypasses no checks. The next offline recovery still requires writer shutdown, read-only staging, fingerprints, backups, atomic installation, and upstream validation.
+
+`/healthz` exposes `index_repair` state, current/pending/verified/failed IDs, transaction identity, timestamps, and the last error. Prometheus exposes repair detection, attempt, success, failure, rollback, pending, and current-volume metrics without permanent per-volume labels.
+
+Never run orphan deletion during or immediately after an index incident. Corrupt indexes can make orphan conclusions unreliable, and automatic repair intentionally contains no orphan deletion path.
+
 The durable file `state_dir/guardian/generation-history.json` keeps the last 64 completed outcomes and counters by cause. A large generation number alone is not a failure; use the cause counters, phase, transport, duration, and clean/unclean outcome to diagnose churn.
 
 ## Guardian restart during failover

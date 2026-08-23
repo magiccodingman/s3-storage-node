@@ -14,6 +14,7 @@ LABEL org.opencontainers.image.title="S3 Storage Node" \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates \
+       bindfs \
        cifs-utils \
        e2fsprogs \
        fuse3 \

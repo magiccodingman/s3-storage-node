@@ -9,7 +9,7 @@ The supplied Compose configuration grants:
 - `CAP_SYS_ADMIN` for mount and namespace operations;
 - `CAP_NET_ADMIN` for worker veth, routing, firewall, and fencing work;
 - relaxed AppArmor confinement because Docker's default profile may deny filesystem mounts;
-- optional `/dev/fuse` access only when the SSHFS overlay is used.
+- `/dev/fuse` access for the read-only single-file index-repair projection and for SSHFS recovery when configured.
 
 The container does **not** require:
 
@@ -41,6 +41,14 @@ The Compose file uses a read-only root filesystem. Writable locations are limite
 - explicitly configured storage targets.
 
 Underlying managed mountpoints are root-owned and mode `000`. When a managed filesystem is absent, the unprivileged SeaweedFS process cannot write into the ordinary directory beneath it.
+
+## Index-repair source isolation
+
+The guardian is privileged enough to mount storage, but the process parsing SeaweedFS volume records is not given the writable production data path. After every SeaweedFS writer stops, a disposable child mount namespace exposes only the selected authoritative `.dat` through layered read-only mounts. The source bind, permission-masking FUSE projection, and final file bind are all verified read-only, and an attempted write as UID/GID `10001` must fail.
+
+SeaweedFS 4.44's `weed fix` uses file permission bits to choose its open mode. The FUSE projection masks write bits without chmod, copying, renaming, or otherwise changing the remote source. Source content, size, ownership, mode, and bounded fingerprints are checked across the operation. The helper namespace and FUSE mount are destroyed after each attempt.
+
+Candidates, journals, and backups reside on the local index filesystem. Journal and backup directories are root-only; the per-transaction staging directory is writable only where required for the unprivileged SeaweedFS helper. No repair command receives credentials or a broad writable remote-data directory.
 
 ## Secrets
 

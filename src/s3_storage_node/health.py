@@ -39,6 +39,19 @@ class HealthState:
             "orphan_deletion_safe": False,
             "collections": {},
         }
+        self.index_repair: dict[str, Any] = {
+            "enabled": False,
+            "state": "idle",
+            "transaction_id": "",
+            "pending_volume_ids": [],
+            "current_volume_id": 0,
+            "verified_volume_ids": [],
+            "failed_volume_ids": [],
+            "last_error": "",
+            "started_at": 0.0,
+            "updated_at": 0.0,
+            "counters": {},
+        }
 
     def set(self, state: str, ready: bool, reason: str = "") -> None:
         with self._lock:
@@ -83,6 +96,10 @@ class HealthState:
         with self._lock:
             self.seaweed_volumes = dict(values)
 
+    def set_index_repair(self, values: dict[str, Any]) -> None:
+        with self._lock:
+            self.index_repair = dict(values)
+
     def increment_failure(self) -> int:
         with self._lock:
             self.failures_total += 1
@@ -114,6 +131,7 @@ class HealthState:
                 "generation": self.generation,
                 "generation_history": self.generation_history,
                 "seaweed_volumes": self.seaweed_volumes,
+                "index_repair": self.index_repair,
             }
 
 
@@ -185,6 +203,20 @@ class Handler(BaseHTTPRequestHandler):
             f"s3_storage_node_seaweed_volume_unexpected_readonly {snapshot['seaweed_volumes'].get('unexpected_readonly', 0)}",
             "# TYPE s3_storage_node_orphan_deletion_safe gauge",
             f"s3_storage_node_orphan_deletion_safe {1 if snapshot['seaweed_volumes'].get('orphan_deletion_safe') else 0}",
+            "# TYPE s3_storage_node_index_repairs_detected_total counter",
+            f"s3_storage_node_index_repairs_detected_total {snapshot['index_repair'].get('counters', {}).get('detected_total', 0)}",
+            "# TYPE s3_storage_node_index_repairs_attempted_total counter",
+            f"s3_storage_node_index_repairs_attempted_total {snapshot['index_repair'].get('counters', {}).get('attempted_total', 0)}",
+            "# TYPE s3_storage_node_index_repairs_succeeded_total counter",
+            f"s3_storage_node_index_repairs_succeeded_total {snapshot['index_repair'].get('counters', {}).get('succeeded_total', 0)}",
+            "# TYPE s3_storage_node_index_repairs_failed_total counter",
+            f"s3_storage_node_index_repairs_failed_total {snapshot['index_repair'].get('counters', {}).get('failed_total', 0)}",
+            "# TYPE s3_storage_node_index_repairs_rolled_back_total counter",
+            f"s3_storage_node_index_repairs_rolled_back_total {snapshot['index_repair'].get('counters', {}).get('rolled_back_total', 0)}",
+            "# TYPE s3_storage_node_index_repair_pending gauge",
+            f"s3_storage_node_index_repair_pending {len(snapshot['index_repair'].get('pending_volume_ids', []))}",
+            "# TYPE s3_storage_node_index_repair_current_volume gauge",
+            f"s3_storage_node_index_repair_current_volume {snapshot['index_repair'].get('current_volume_id', 0)}",
         ]
         generation_counters = snapshot["generation_history"].get("counters", {})
         generation_metrics = {

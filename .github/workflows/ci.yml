@@ -94,5 +94,16 @@ jobs:
         run: docker run --rm --entrypoint /usr/bin/sshfs s3-storage-node:ci --version
       - name: Verify pinned SeaweedFS release
         run: docker run --rm --entrypoint /usr/local/bin/weed s3-storage-node:ci version | grep -F '4.44'
+      - name: Rebuild real indexes through a read-only private mount namespace
+        run: |
+          docker run --rm \
+            --cap-add SYS_ADMIN \
+            --device /dev/fuse:/dev/fuse \
+            --security-opt apparmor=unconfined \
+            -e PYTHONPATH=/opt/s3-storage-node/src \
+            -v "${{ github.workspace }}:/workspace:ro" \
+            --entrypoint python3 \
+            s3-storage-node:ci \
+            /workspace/tests/real_index_repair_check.py
       - name: Verify image entrypoint dispatches operator commands
         run: docker run --rm s3-storage-node:ci --help

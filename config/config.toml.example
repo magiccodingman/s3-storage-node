@@ -106,6 +106,9 @@ directory = "volume-indexes"
 
 [seaweed]
 volume_directory = "volumes"
+auto_index_repair_enabled = true
+index_repair_concurrency = 1
+index_repair_timeout_seconds = 3600
 master_port = 9333
 volume_port = 8080
 filer_port = 8888
