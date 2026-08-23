@@ -27,9 +27,9 @@ The sample file at `config/config.toml.example` is the recommended starting poin
 | `shutdown_grace_seconds` | `20` | One global SeaweedFS drain deadline before hard-fence fallback |
 | `recovery_initial_seconds` | `5` | Initial recovery retry delay |
 | `recovery_max_seconds` | `60` | Maximum exponential recovery delay |
-| `recovery_stability_seconds` | `15` | Minimum healthy interval before readiness returns |
-| `recovery_probe_interval_seconds` | `2` | Probe cadence during recovery certification |
-| `recovery_successes_required` | `3` | Consecutive successful recovery probes required |
+| `recovery_stability_seconds` | `15` | Minimum unchanged upstream volume-status interval at startup and healthy interval before readiness returns |
+| `recovery_probe_interval_seconds` | `2` | Probe cadence during startup volume-status and recovery certification |
+| `recovery_successes_required` | `3` | Consecutive identical startup volume-status samples and successful recovery probes required |
 | `s3_canary_enabled` | `true` | Require authenticated end-to-end S3 PUT/GET/DELETE checks |
 | `worker_fencing_mode` | `disabled` | `disabled` or `namespace`; the sample enables `namespace` |
 | `worker_host_address` | `169.254.254.1/30` | Root side of the private worker veth |

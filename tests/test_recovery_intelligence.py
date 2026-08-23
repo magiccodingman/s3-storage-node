@@ -112,3 +112,63 @@ def test_unexpected_upstream_readonly_volume_fails_health(monkeypatch: pytest.Mo
         guardian._check_seaweed_volumes()
 
     assert guardian.health.snapshot()["seaweed_volumes"]["unexpected_readonly"] == 3
+
+
+def volume_status(readonly_ids: list[int]) -> dict[str, object]:
+    return {
+        "checked": True,
+        "total": 3,
+        "readonly": len(readonly_ids),
+        "writable": 3 - len(readonly_ids),
+        "expected_readonly": 0,
+        "unexpected_readonly": len(readonly_ids),
+        "readonly_volume_ids": readonly_ids,
+        "unexpected_readonly_volume_ids": readonly_ids,
+        "volume_details": [
+            {
+                "id": volume_id,
+                "collection": "data",
+                "readonly": volume_id in readonly_ids,
+                "expected_readonly": False,
+            }
+            for volume_id in (1, 2, 3)
+        ],
+        "collections": {},
+    }
+
+
+def test_startup_wait_ignores_transient_global_readonly_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guardian = make_guardian()
+    guardian.config.seaweed.volume_health_enabled = True
+    guardian.config.seaweed.expected_readonly_volume_ids = ()
+    guardian.config.appliance.recovery_successes_required = 2
+    transient = volume_status([1, 2, 3])
+    settled = volume_status([3])
+    inspect = Mock(side_effect=[transient, settled, settled])
+    monkeypatch.setattr("s3_storage_node.guardian.inspect_volume_status", inspect)
+    guardian._interruptible_sleep = Mock()
+
+    with pytest.raises(SeaweedHealthError, match="3") as exc_info:
+        guardian._wait_for_stable_seaweed_volumes()
+
+    assert exc_info.value.status["unexpected_readonly_volume_ids"] == [3]
+    assert inspect.call_count == 3
+
+
+def test_startup_wait_accepts_only_repeated_stable_volume_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guardian = make_guardian()
+    guardian.config.seaweed.volume_health_enabled = True
+    guardian.config.seaweed.expected_readonly_volume_ids = ()
+    guardian.config.appliance.recovery_successes_required = 2
+    transient = volume_status([1, 2, 3])
+    settled = volume_status([])
+    inspect = Mock(side_effect=[transient, settled, settled])
+    monkeypatch.setattr("s3_storage_node.guardian.inspect_volume_status", inspect)
+    guardian._interruptible_sleep = Mock()
+
+    assert guardian._wait_for_stable_seaweed_volumes() == settled
+    assert inspect.call_count == 3
