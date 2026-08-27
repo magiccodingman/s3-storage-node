@@ -22,6 +22,19 @@ class UnexpectedReadonlyVolumes(SeaweedHealthError):
         )
 
 
+def all_volumes_readonly(status: dict[str, Any]) -> bool:
+    """Identify the high-blast-radius state that is unsafe to treat as index damage."""
+
+    try:
+        total = int(status.get("total", 0))
+        readonly = int(status.get("readonly", 0))
+        writable = int(status.get("writable", 0))
+        unexpected = int(status.get("unexpected_readonly", 0))
+    except (TypeError, ValueError):
+        return False
+    return total > 0 and readonly == total and writable == 0 and unexpected > 0
+
+
 def parse_volume_status(payload: object, expected_readonly_ids: set[int]) -> dict[str, Any]:
     if not isinstance(payload, dict) or "Volumes" not in payload:
         raise SeaweedHealthError("SeaweedFS volume status did not contain a Volumes array")

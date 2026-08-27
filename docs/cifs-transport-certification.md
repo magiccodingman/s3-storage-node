@@ -70,4 +70,6 @@ This intentionally resembles the long-lived append pattern used by SeaweedFS vol
 
 Any online process or storage-probe failure moves readiness to `SUSPECT` immediately, causing HAProxy health checks to withdraw the endpoint before mount repair begins. After storage is remounted and SeaweedFS restarts, the node remains in `VERIFYING_RECOVERY` until full durability probes and the S3 canary succeed repeatedly across a stability window. Only then does it return to `ONLINE`.
 
-This PR does not provide worker-generation namespaces, distributed writer leases, or CIFS-to-SFTP failover. Those require a separate fencing layer so a previously blocked SeaweedFS process cannot regain access and overlap a replacement generation.
+Size `appliance.probe_timeout_seconds` for the certified server reconnect bound. The default is 60 seconds because remote CIFS services can legitimately pause through a reconnect interval; a shorter deadline can turn transient latency into unnecessary generation churn. Readiness still withdraws when the deadline expires, and no alternate generation starts before the old one is drained or physically fenced.
+
+The current appliance layers this certification under worker-generation namespaces, a local writer lease, and exclusive CIFS-to-SSHFS failover. A previously blocked generation must be physically network-fenced before any replacement can reach the dataset.

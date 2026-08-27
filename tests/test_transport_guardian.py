@@ -153,6 +153,25 @@ def test_non_storage_failure_keeps_current_transport(tmp_path: Path) -> None:
     assert guardian.active_transport == "cifs-primary"
 
 
+def test_fence_reaps_the_selected_sshfs_process_after_network_is_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    write_failover(config_path)
+    guardian = Guardian(make_config(tmp_path), str(config_path))
+    guardian.generation = fake_generation(1)
+    guardian.active_transport = "sshfs-secondary"
+    stopped: list[str] = []
+    monkeypatch.setattr(
+        "s3_storage_node.transport_guardian._stop_sshfs_process",
+        lambda target: stopped.append(target.transport_name),
+    )
+
+    assert guardian._fence_generation("storage probe failed") is True
+    assert guardian.generation.fence.called
+    assert stopped == ["sshfs-secondary"]
+
+
 def test_manual_switch_drains_and_detaches_before_fence(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     write_failover(config_path)

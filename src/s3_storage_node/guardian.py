@@ -14,7 +14,12 @@ from .logging import event
 from .processes import ManagedProcess, ProcessError, wait_for_tcp
 from .render import render_filer_toml, render_haproxy, render_s3_config
 from .s3check import run_canary
-from .seaweed_health import SeaweedHealthError, UnexpectedReadonlyVolumes, inspect_volume_status
+from .seaweed_health import (
+    SeaweedHealthError,
+    UnexpectedReadonlyVolumes,
+    all_volumes_readonly,
+    inspect_volume_status,
+)
 from .storage import StorageError, prepare_barrier
 
 
@@ -333,11 +338,12 @@ class Guardian:
             return {}
 
         stability_seconds = getattr(self.config.appliance, "recovery_stability_seconds", 15)
+        all_readonly_wait_seconds = getattr(self.config.seaweed, "all_readonly_wait_seconds", 75)
         probe_interval = getattr(self.config.appliance, "recovery_probe_interval_seconds", 2)
         required_successes = getattr(self.config.appliance, "recovery_successes_required", 3)
         timeout_seconds = max(
             getattr(self.config.appliance, "startup_timeout_seconds", 30),
-            stability_seconds + (probe_interval * required_successes),
+            all_readonly_wait_seconds + stability_seconds + (probe_interval * required_successes),
         )
         deadline = time.monotonic() + timeout_seconds
         stable_since = 0.0
@@ -374,7 +380,9 @@ class Guardian:
                 else:
                     successes += 1
                 elapsed = now - stable_since
-                if successes >= required_successes and elapsed >= stability_seconds:
+                global_readonly = all_volumes_readonly(result)
+                required_stability = all_readonly_wait_seconds if global_readonly else stability_seconds
+                if successes >= required_successes and elapsed >= required_stability:
                     event(
                         "info",
                         "seaweed_volume_status_stable",
@@ -383,6 +391,12 @@ class Guardian:
                         total=result.get("total", 0),
                         unexpected_readonly_volume_ids=result.get("unexpected_readonly_volume_ids", []),
                     )
+                    if global_readonly:
+                        raise SeaweedHealthError(
+                            "SeaweedFS continued to report every volume read-only after "
+                            f"{required_stability} seconds; refusing broad automatic index repair "
+                            "without volume-specific evidence"
+                        )
                     return self._accept_seaweed_volume_status(result)
 
             remaining = deadline - time.monotonic()

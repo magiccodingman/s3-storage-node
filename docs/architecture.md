@@ -92,6 +92,8 @@ The appliance uses endpoint-wide fail-closed behavior. If active data, embedded 
 
 A listening socket is insufficient. Recovery requires repeated full storage probes plus an authenticated S3 PUT/GET/DELETE canary and a configurable stability window. HAProxy forwards public traffic only after the guardian completes that proof.
 
+The startup gate separately protects against a global read-only false positive. SeaweedFS can temporarily mark every volume read-only while its periodic disk-space check still reflects a transient remote `statfs` failure. The guardian waits through that refresh interval and refuses to interpret a persistent all-volume read-only response as evidence that every local index is corrupt. Automatic repair remains limited to volume-specific upstream failures, and an identical reconstructed index is recorded without replacing the live file.
+
 ### Storage helpers have deadlines
 
 Potentially blocking mount, unmount, enrollment, layout, and probe operations run in child processes with explicit timeouts. The guardian can withdraw readiness and physically fence a worker even when the kernel traps a helper in storage I/O.
