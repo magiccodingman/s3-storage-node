@@ -175,6 +175,40 @@ def test_pid_reuse_does_not_kill_unrelated_process(tmp_path: Path, monkeypatch: 
     assert not Path(value.ssh_runtime_pid_file).exists()
 
 
+def test_sshfs_pid_file_is_preserved_when_process_cannot_be_reaped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value = replace(key_target(tmp_path), ssh_runtime_pid_file=str(tmp_path / "sshfs.pid"))
+    pid_path = Path(value.ssh_runtime_pid_file)
+    pid_path.write_text("321\n")
+    original_read_bytes = Path.read_bytes
+    original_exists = Path.exists
+
+    def read_bytes(path: Path) -> bytes:
+        if str(path) == "/proc/321/cmdline":
+            return f"sshfs\0source\0{value.mountpoint}\0".encode()
+        return original_read_bytes(path)
+
+    def exists(path: Path) -> bool:
+        if str(path) == "/proc/321":
+            return True
+        return original_exists(path)
+
+    ticks = iter(range(20))
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(Path, "exists", exists)
+    monkeypatch.setattr(storage.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(storage.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(storage.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    with pytest.raises(storage.StorageError, match="preserving its PID file"):
+        storage._stop_sshfs_process(value)
+
+    assert pid_path.exists()
+    assert killed == [(321, storage.signal.SIGTERM), (321, storage.signal.SIGKILL)]
+
+
 def test_sshfs_unmount_prefers_clean_detach(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     value = key_target(tmp_path)
     mounted = SimpleNamespace(filesystem="fuse.sshfs", source=value.source)

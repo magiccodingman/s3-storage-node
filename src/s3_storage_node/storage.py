@@ -124,7 +124,15 @@ def _stop_sshfs_process(target: TargetConfig) -> None:
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
-            pass
+            pid_path.unlink(missing_ok=True)
+            return
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and Path(f"/proc/{pid}").exists():
+            time.sleep(0.05)
+    if Path(f"/proc/{pid}").exists():
+        raise StorageError(
+            f"SSHFS process {pid} remained after SIGKILL; preserving its PID file and refusing replacement"
+        )
     pid_path.unlink(missing_ok=True)
 
 
@@ -141,6 +149,7 @@ def _sshfs_error(stderr_file, password: str = "") -> str:
 
 
 def _mount_sshfs(target: TargetConfig) -> None:
+    _stop_sshfs_process(target)
     transport = target.transport_name or target.name
     if not target.ssh_known_hosts_file:
         raise StorageError(f"SSHFS transport {transport} is missing known-hosts configuration")

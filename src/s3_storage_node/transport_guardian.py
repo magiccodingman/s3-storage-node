@@ -7,11 +7,12 @@ from . import __version__
 from .config import ConfigError, load_config
 from .generation_guardian import Guardian as GenerationGuardian
 from .logging import event
-from .storage import StorageError
+from .storage import StorageError, _stop_sshfs_process
 from .transport_failover import (
     TransportFailoverError,
     TransportSelector,
     load_exclusive_failover,
+    resolve_target,
     startup_verification_fingerprint,
 )
 
@@ -179,6 +180,28 @@ class Guardian(GenerationGuardian):
     def _fence_generation(self, reason: str) -> bool:
         fenced = super()._fence_generation(reason)
         failed_transport = self._transport_failure_name or self.active_transport
+        if fenced and self.failover is not None and failed_transport:
+            try:
+                target = resolve_target(
+                    self.config_path,
+                    self.config,
+                    self.failover.target,
+                    failed_transport,
+                )
+                if target.type == "sshfs":
+                    _stop_sshfs_process(target)
+                    event(
+                        "info",
+                        "fenced_sshfs_process_reaped",
+                        transport=failed_transport,
+                    )
+            except Exception as exc:  # noqa: BLE001 - cleanup follows a verified network fence
+                event(
+                    "error",
+                    "fenced_sshfs_process_cleanup_failed",
+                    transport=failed_transport,
+                    error=str(exc),
+                )
         if (fenced and self.transport_selector is not None and failed_transport
                 and not self.stopping and not self._controlled_transport_switch and self._transport_failure):
             self.transport_selector.record_failure(failed_transport, reason)

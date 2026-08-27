@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from s3_storage_node.seaweed_health import SeaweedHealthError, parse_volume_status
+from s3_storage_node.seaweed_health import SeaweedHealthError, all_volumes_readonly, parse_volume_status
 
 
 def test_volume_status_uses_upstream_readonly_state_and_reports_collections() -> None:
@@ -38,6 +38,26 @@ def test_expected_readonly_ids_do_not_duplicate_seaweed_lifecycle_rules() -> Non
     )
     assert result["unexpected_readonly"] == 0
     assert result["expected_readonly"] == 1
+
+
+def test_global_readonly_state_is_identified_without_reclassifying_individual_volumes() -> None:
+    result = parse_volume_status(
+        {
+            "Volumes": [
+                {"Id": 1, "ReadOnly": True},
+                {"Id": 2, "ReadOnly": True},
+                {"Id": 3, "ReadOnly": True},
+            ]
+        },
+        expected_readonly_ids={3},
+    )
+
+    assert all_volumes_readonly(result) is True
+    assert result["unexpected_readonly_volume_ids"] == [1, 2]
+    assert all_volumes_readonly(parse_volume_status(
+        {"Volumes": [{"Id": 1, "ReadOnly": False}, {"Id": 2, "ReadOnly": True}]},
+        expected_readonly_ids=set(),
+    )) is False
 
 
 def test_nil_upstream_volume_list_is_an_empty_server() -> None:

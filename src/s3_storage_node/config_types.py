@@ -56,7 +56,7 @@ class ApplianceConfig:
     health_port: int = 9090
     probe_interval_seconds: int = 5
     full_probe_interval_seconds: int = 60
-    probe_timeout_seconds: int = 4
+    probe_timeout_seconds: int = 60
     startup_timeout_seconds: int = 30
     shutdown_grace_seconds: int = 45
     recovery_initial_seconds: int = 5
@@ -114,6 +114,7 @@ class SeaweedConfig:
     encrypt_volume_data: bool = False
     volume_health_enabled: bool = True
     expected_readonly_volume_ids: tuple[int, ...] = ()
+    all_readonly_wait_seconds: int = 75
     auto_index_repair_enabled: bool = True
     index_repair_concurrency: int = 1
     index_repair_timeout_seconds: int = 3600

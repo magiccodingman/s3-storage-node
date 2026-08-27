@@ -6,7 +6,7 @@ health_host = "0.0.0.0"
 health_port = 9090
 probe_interval_seconds = 5
 full_probe_interval_seconds = 60
-probe_timeout_seconds = 4
+probe_timeout_seconds = 60
 startup_timeout_seconds = 30
 shutdown_grace_seconds = 45
 recovery_initial_seconds = 5
@@ -106,6 +106,7 @@ directory = "volume-indexes"
 
 [seaweed]
 volume_directory = "volumes"
+all_readonly_wait_seconds = 75
 auto_index_repair_enabled = true
 index_repair_concurrency = 1
 index_repair_timeout_seconds = 3600

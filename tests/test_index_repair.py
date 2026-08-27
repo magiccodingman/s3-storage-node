@@ -143,6 +143,56 @@ def test_atomic_install_retains_idx_and_sdx_backups(tmp_path: Path) -> None:
     assert transaction["source_fingerprint"]["dataset_sentinel_id"] == "dataset-1"
 
 
+def test_identical_candidate_is_not_installed_or_backed_up(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    live_idx = config.index_path / "photos_1.idx"
+    live_sdx = config.index_path / "photos_1.sdx"
+    live_idx.write_bytes(b"same-index")
+    live_sdx.write_bytes(b"keep-sorted-index")
+    controller = IndexRepairController(config, HealthState())
+    controller.prepare_offline()
+    install_fake_builder(controller, candidate=b"same-index")
+
+    with pytest.raises(IndexRepairManualIntervention, match="byte-for-byte identical"):
+        controller.repair_detected(
+            status(), generation_id=7, active_transport="cifs-primary",
+            generation_failure_cause="seaweed_volume_health_failure",
+        )
+
+    assert live_idx.read_bytes() == b"same-index"
+    assert live_sdx.read_bytes() == b"keep-sorted-index"
+    transaction = controller.journal.load_all()[0]
+    assert transaction["phase"] == "manual_intervention_required"
+    assert transaction["candidate_identical_to_live_index"] is True
+    assert transaction["candidate_installed"] is False
+    assert "backup_idx_path" not in transaction
+
+
+def test_global_readonly_status_is_rejected_before_any_repair_transaction(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    controller = IndexRepairController(config, HealthState())
+    controller.prepare_offline()
+    global_status = {
+        "total": 2,
+        "readonly": 2,
+        "writable": 0,
+        "unexpected_readonly": 2,
+        "unexpected_readonly_volume_ids": [1, 2],
+        "volume_details": [
+            {"id": 1, "collection": "photos", "readonly": True, "expected_readonly": False},
+            {"id": 2, "collection": "photos", "readonly": True, "expected_readonly": False},
+        ],
+    }
+
+    with pytest.raises(IndexRepairManualIntervention, match="every upstream volume"):
+        controller.repair_detected(
+            global_status, generation_id=8, active_transport="cifs-primary",
+            generation_failure_cause="seaweed_volume_health_failure",
+        )
+
+    assert controller.journal.load_all() == []
+
+
 def test_upstream_rejection_rolls_back_idx_and_sdx(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     live_idx = config.index_path / "photos_1.idx"

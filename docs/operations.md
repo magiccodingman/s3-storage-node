@@ -182,6 +182,8 @@ Only add an expected ID after independently proving that its read-only lifecycle
 
 Unexpected upstream `ReadOnly` volumes trigger reconstruction only while readiness is already withdrawn. The guardian records their exact IDs and collections, stops the complete SeaweedFS stack, verifies the writers are gone, and reconstructs each local `.idx` from its authoritative remote `.dat`. It never scans every healthy volume.
 
+An all-volume read-only snapshot is never accepted as a broad repair target. SeaweedFS can produce this snapshot after a remote filesystem temporarily reports zero free space and retain it until the next internal disk-space refresh. The guardian therefore waits at least `seaweed.all_readonly_wait_seconds`. If the volume server settles to a volume-specific result, normal classification continues. If every volume remains read-only, the endpoint stays offline and the guardian reports that broad repair was refused. Investigate the transport, remote capacity, `statfs`, and SeaweedFS disk-space logs before authorizing any index work.
+
 The source is fingerprinted before and after reconstruction using dataset identity, active transport, collection, volume ID, size, modification time, and bounded head/tail hashes. A changed fingerprint aborts before live installation. `weed fix` runs as the SeaweedFS UID/GID against an individually mounted read-only view; `-ignoreError` and `-remoteFile` are never used.
 
 Persistent state is stored beneath:
@@ -194,6 +196,8 @@ Persistent state is stored beneath:
 ```
 
 The original `.idx` and any `.sdx` are hash-verified and retained before atomic replacement. `.sdx` is derived sorted-index state and is removed after backup so SeaweedFS cannot reuse it with the rebuilt `.idx`. Repair backups are not automatically pruned.
+
+If `weed fix` reconstructs an `.idx` whose size and SHA-256 are identical to the live index, the controller does not create a backup, replace the index, or remove `.sdx`. The transaction enters `manual_intervention_required` with `candidate_identical_to_live_index=true`, proving that index divergence does not explain the upstream read-only state.
 
 After restart, each target must be present in `/status` with `ReadOnly=false`. A rejected or missing target causes another complete writer stop, restoration of that volume's original `.idx` and `.sdx`, and a persistent manual-intervention block. A complete record beyond the old index is normally recovered. An incomplete final record may produce no valid candidate or may still be rejected by the volume server; the appliance never truncates the `.dat` to make it load.
 
@@ -248,6 +252,8 @@ The guardian fails closed in either case:
 - no new transport is selected while a previous storage helper remains blocked;
 - a pending manual request remains pending rather than being discarded;
 - health and logs expose the blocker.
+
+After a generation's network fence is verified, the guardian also resolves the selected SSHFS PID file, verifies the process command line and mountpoint, and terminates that exact SSHFS process. A replacement SSHFS mount refuses to start while that PID remains alive, and the PID file is preserved if even `SIGKILL` cannot reap it. This prevents a detached FUSE transport from accumulating across generations without weakening the network fence or PID-reuse protections.
 
 Do not manually delete persistent guardian state to force progress. Restore the failed transport or reboot the host when necessary to release uninterruptible kernel tasks, then allow the guardian to recover normally.
 
