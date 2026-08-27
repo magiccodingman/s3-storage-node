@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .logging import event
+from .seaweed_health import all_volumes_readonly
 
 
 TERMINAL_PHASES = {"verified", "manual_intervention_required", "resolved_without_install"}
@@ -454,6 +455,11 @@ class IndexRepairController:
     ) -> None:
         if not self.enabled:
             raise IndexRepairManualIntervention("automatic SeaweedFS index repair is disabled")
+        if all_volumes_readonly(status):
+            raise IndexRepairManualIntervention(
+                "refusing automatic index repair while every upstream volume is read-only; "
+                "the status does not provide volume-specific evidence of index divergence"
+            )
         self.health.set("REPAIRING_INDEXES", False, "rebuilding indexes from read-only authoritative .dat files")
         details = {
             int(item["id"]): item for item in status.get("volume_details", [])
@@ -704,6 +710,25 @@ class IndexRepairController:
             reason = str(exc)
             self._record_preinstall_failure(transaction, reason)
             raise IndexRepairError(reason) from exc
+        if not _same_artifact(candidate, transaction["candidate_idx"]):
+            reason = "reconstructed candidate does not match its reported size and hash"
+            self._record_preinstall_failure(transaction, reason)
+            raise IndexRepairError(reason)
+        if (
+            transaction["candidate_idx"]["size"] == old_idx["size"]
+            and transaction["candidate_idx"]["sha256"] == old_idx["sha256"]
+        ):
+            reason = (
+                "reconstructed candidate is byte-for-byte identical to the live index; "
+                "the upstream read-only state is not explained by index divergence"
+            )
+            self._manual(
+                transaction,
+                reason,
+                candidate_identical_to_live_index=True,
+                candidate_installed=False,
+            )
+            raise IndexRepairManualIntervention(reason)
         self.journal.transition(transaction, "candidate_built")
         self._create_backups(transaction)
         self._install_candidate(transaction)
@@ -917,9 +942,13 @@ class IndexRepairController:
         self.journal.transition(transaction, "rolled_back", rolled_back=True, failure_reason=reason)
         self._manual(transaction, reason)
 
-    def _manual(self, transaction: dict[str, Any], reason: str) -> None:
+    def _manual(self, transaction: dict[str, Any], reason: str, **values: Any) -> None:
         self.journal.transition(
-            transaction, "manual_intervention_required", success=False, failure_reason=reason,
+            transaction,
+            "manual_intervention_required",
+            success=False,
+            failure_reason=reason,
+            **values,
         )
 
     def unresolved_unexpected(self, status: dict[str, Any]) -> list[int]:

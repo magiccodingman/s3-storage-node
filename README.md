@@ -18,7 +18,7 @@ S3 Storage Node gives that storage an explicit safety boundary.
 - **Recovery requires end-to-end proof.** Storage identity, capacity, durable write/read/delete probes, upstream SeaweedFS volume status, authenticated S3 canaries, and a stability window must all pass before traffic reopens.
 - **CIFS may have an exclusive SSHFS recovery route.** Only one transport is selected for a generation. CIFS and SSHFS are never mounted as simultaneous writers and represent one storage failure domain, not two replicas.
 - **Metadata and indexes may be separated.** Bulk `.dat` files can live remotely while filer metadata and `.idx` files remain on fast persistent local storage.
-- **Damaged local indexes repair offline.** Unexpected read-only volumes trigger journaled reconstruction from an individually exposed read-only `.dat`, with original-index backups, atomic installation, upstream validation, and rollback on rejection.
+- **Damaged local indexes repair offline.** Unexpected volume-specific read-only states trigger journaled reconstruction from an individually exposed read-only `.dat`, with original-index backups, atomic installation, upstream validation, and rollback on rejection. Global read-only snapshots and byte-identical candidates are refused rather than treated as index damage.
 - **Health is observable.** JSON logs, readiness/liveness endpoints, Prometheus metrics, bounded generation outcomes and causes, index trust, SeaweedFS read-only volumes, selected transport, probe results, capacity, failures, and recoveries are exposed.
 
 This does not make a remote filesystem equivalent to an enterprise local disk array. It makes failure explicit and prevents the node from claiming success while its guarded storage path is unsafe.
@@ -241,7 +241,7 @@ Restoring CIFS does not cause automatic failback.
 2. SeaweedFS shutdown is attempted in reverse dependency order under one global deadline.
 3. If writers exit, the active storage route is cleanly detached before physical fencing.
 4. If drain or detach fails, the worker is hard-fenced immediately and its indexes are marked suspect.
-5. A replacement generation uses upstream `/status` to identify unexpected read-only volumes. It stops every SeaweedFS writer, reconstructs only those `.idx` files from individually exposed read-only authoritative `.dat` inputs, and retains rollback backups.
+5. A replacement generation uses upstream `/status` to identify unexpected read-only volumes. A transient all-volume read-only snapshot is held through SeaweedFS's disk-space refresh and is never accepted as a broad repair target. For volume-specific failures, the guardian stops every SeaweedFS writer, reconstructs only those `.idx` files from individually exposed read-only authoritative `.dat` inputs, and retains rollback backups.
 6. Rebuilt candidates must be present and writable in upstream `/status`; rejected candidates are rolled back and blocked from automatic loops.
 7. A failed transport is persisted and the next eligible exclusive transport is selected after recovery backoff.
 8. Storage identity, capacity, full durability probes, SeaweedFS volume status, S3 canaries, and the recovery stability window must pass.

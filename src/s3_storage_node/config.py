@@ -77,7 +77,7 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         health_port=_int(appliance_raw.get("health_port"), "appliance.health_port", 9090),
         probe_interval_seconds=_int(appliance_raw.get("probe_interval_seconds"), "appliance.probe_interval_seconds", 5),
         full_probe_interval_seconds=_int(appliance_raw.get("full_probe_interval_seconds"), "appliance.full_probe_interval_seconds", 60),
-        probe_timeout_seconds=_int(appliance_raw.get("probe_timeout_seconds"), "appliance.probe_timeout_seconds", 4),
+        probe_timeout_seconds=_int(appliance_raw.get("probe_timeout_seconds"), "appliance.probe_timeout_seconds", 60),
         startup_timeout_seconds=_int(appliance_raw.get("startup_timeout_seconds"), "appliance.startup_timeout_seconds", 30),
         shutdown_grace_seconds=_int(appliance_raw.get("shutdown_grace_seconds"), "appliance.shutdown_grace_seconds", 45),
         recovery_initial_seconds=_int(appliance_raw.get("recovery_initial_seconds"), "appliance.recovery_initial_seconds", 5),
@@ -190,6 +190,9 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         expected_readonly_volume_ids=tuple(
             _int_list(seaweed_raw.get("expected_readonly_volume_ids"), "seaweed.expected_readonly_volume_ids")
         ),
+        all_readonly_wait_seconds=_int(
+            seaweed_raw.get("all_readonly_wait_seconds"), "seaweed.all_readonly_wait_seconds", 75,
+        ),
         auto_index_repair_enabled=_bool(
             seaweed_raw.get("auto_index_repair_enabled"), "seaweed.auto_index_repair_enabled", True,
         ),
@@ -207,6 +210,7 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         raise ConfigError("seaweed.expected_readonly_volume_ids must contain positive volume IDs")
     if len(seaweed.expected_readonly_volume_ids) != len(set(seaweed.expected_readonly_volume_ids)):
         raise ConfigError("seaweed.expected_readonly_volume_ids must not contain duplicates")
+    _positive(seaweed.all_readonly_wait_seconds, "seaweed.all_readonly_wait_seconds")
     _positive(seaweed.index_repair_concurrency, "seaweed.index_repair_concurrency")
     _positive(seaweed.index_repair_timeout_seconds, "seaweed.index_repair_timeout_seconds")
     if seaweed.index_repair_concurrency > 8:

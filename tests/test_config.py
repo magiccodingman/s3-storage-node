@@ -66,9 +66,21 @@ def test_loads_valid_path_configuration(tmp_path: Path) -> None:
     assert config.index_path == tmp_path / "state" / "index" / "volume-indexes"
     assert config.index_repair_path == config.index_path / ".s3-storage-node-repair"
     assert config.appliance.shutdown_grace_seconds == 45
+    assert config.appliance.probe_timeout_seconds == 60
+    assert config.seaweed.all_readonly_wait_seconds == 75
     assert config.seaweed.auto_index_repair_enabled is True
     assert config.seaweed.index_repair_concurrency == 1
     assert config.seaweed.index_repair_timeout_seconds == 3600
+
+
+def test_all_readonly_wait_must_be_positive(tmp_path: Path) -> None:
+    text = BASE.format(
+        state="/tmp/state", runtime="/tmp/run", data="/tmp/state/data",
+        meta="/tmp/state/meta", index="/tmp/state/index",
+    ).replace("[seaweed]", "[seaweed]\nall_readonly_wait_seconds = 0")
+
+    with pytest.raises(ConfigError, match="seaweed.all_readonly_wait_seconds"):
+        load_config(write_config(tmp_path, text))
 
 
 def test_data_sentinel_is_required(tmp_path: Path) -> None:

@@ -45,6 +45,7 @@ def make_guardian() -> Guardian:
         volume_port=8080,
         filer_port=8888,
         s3_internal_port=8334,
+        all_readonly_wait_seconds=0,
     )
     return Guardian(SimpleNamespace(appliance=appliance, seaweed=seaweed, active_targets=()), "/config.toml")
 
@@ -172,3 +173,45 @@ def test_startup_wait_accepts_only_repeated_stable_volume_snapshot(
 
     assert guardian._wait_for_stable_seaweed_volumes() == settled
     assert inspect.call_count == 3
+
+
+def test_global_readonly_wait_spans_disk_refresh_before_normal_status_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guardian = make_guardian()
+    guardian.config.seaweed.volume_health_enabled = True
+    guardian.config.seaweed.expected_readonly_volume_ids = ()
+    guardian.config.seaweed.all_readonly_wait_seconds = 75
+    guardian.config.appliance.recovery_stability_seconds = 15
+    guardian.config.appliance.recovery_successes_required = 3
+    global_readonly = volume_status([1, 2, 3])
+    settled = volume_status([])
+    inspect = Mock(side_effect=[
+        global_readonly, global_readonly, global_readonly,
+        settled, settled, settled,
+    ])
+    clock = iter([0, 0, 0, 30, 30, 60, 60, 61, 61, 70, 70, 76])
+    monkeypatch.setattr("s3_storage_node.guardian.inspect_volume_status", inspect)
+    monkeypatch.setattr("s3_storage_node.guardian.time.monotonic", lambda: next(clock))
+    guardian._interruptible_sleep = Mock()
+
+    assert guardian._wait_for_stable_seaweed_volumes() == settled
+    assert inspect.call_count == 6
+
+
+def test_persistent_global_readonly_state_is_never_sent_to_automatic_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guardian = make_guardian()
+    guardian.config.seaweed.volume_health_enabled = True
+    guardian.config.seaweed.expected_readonly_volume_ids = ()
+    guardian.config.appliance.recovery_successes_required = 2
+    global_readonly = volume_status([1, 2, 3])
+    inspect = Mock(side_effect=[global_readonly, global_readonly])
+    monkeypatch.setattr("s3_storage_node.guardian.inspect_volume_status", inspect)
+    guardian._interruptible_sleep = Mock()
+
+    with pytest.raises(SeaweedHealthError, match="refusing broad automatic index repair"):
+        guardian._wait_for_stable_seaweed_volumes()
+
+    assert inspect.call_count == 2
