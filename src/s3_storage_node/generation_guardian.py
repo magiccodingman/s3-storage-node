@@ -97,6 +97,9 @@ class Guardian(BaseGuardian):
                         break
                     phase = str(self.health.snapshot().get("state", "unknown"))
                     cause = self.generation_history.classify_cause(exc, phase)
+                    if isinstance(exc, IndexRepairManualIntervention):
+                        self._park_manual_intervention(exc, phase=phase, cause=cause)
+                        break
                     self.health.increment_failure()
                     self.health.set("OFFLINE", False, str(exc))
                     event(
@@ -124,6 +127,30 @@ class Guardian(BaseGuardian):
         finally:
             self.writer_lease.release()
             self.health.set_writer(held=False, owner=self.writer_lease.node_name)
+
+    def _park_manual_intervention(
+        self,
+        exc: IndexRepairManualIntervention,
+        *,
+        phase: str,
+        cause: str,
+    ) -> None:
+        """Fence once and remain fail-closed until an operator restarts us."""
+
+        reason = str(exc)
+        self.health.increment_failure()
+        self.health.set("MANUAL_INTERVENTION_REQUIRED", False, reason)
+        event(
+            "critical", "appliance_manual_intervention_required",
+            error=reason, error_type=type(exc).__name__, generation_cause=cause,
+            failure_phase=phase,
+        )
+        fenced = self._terminate_generation(reason, cause=cause, phase=phase)
+        if not fenced:
+            self.stopping = True
+        self._retire_generation()
+        while not self.stopping:
+            self._interruptible_sleep(1)
 
     def _prepare_state_directory(self) -> None:
         state = self.writer_lease.path.parent.parent

@@ -109,6 +109,7 @@ volume_directory = "volumes"
 all_readonly_wait_seconds = 75
 auto_index_repair_enabled = true
 index_repair_concurrency = 1
+index_repair_max_volumes = 2
 index_repair_timeout_seconds = 3600
 master_port = 9333
 volume_port = 8080

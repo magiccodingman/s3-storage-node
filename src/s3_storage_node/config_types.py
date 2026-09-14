@@ -117,6 +117,7 @@ class SeaweedConfig:
     all_readonly_wait_seconds: int = 75
     auto_index_repair_enabled: bool = True
     index_repair_concurrency: int = 1
+    index_repair_max_volumes: int = 2
     index_repair_timeout_seconds: int = 3600
 
 

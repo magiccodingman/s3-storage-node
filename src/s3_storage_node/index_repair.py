@@ -430,7 +430,10 @@ class IndexRepairController:
         if not isinstance(payload, dict):
             raise IndexRepairError("index repair helper returned an invalid result")
         if process.returncode != 0 or not payload.get("success"):
-            raise IndexRepairError(str(payload.get("error") or stderr.strip() or "index repair helper failed"))
+            error = str(payload.get("error") or stderr.strip() or "index repair helper failed")
+            if payload.get("manual_intervention_required"):
+                raise IndexRepairManualIntervention(error)
+            raise IndexRepairError(error)
         return payload
 
     @staticmethod
@@ -468,6 +471,12 @@ class IndexRepairController:
         unexpected = [int(item) for item in status.get("unexpected_readonly_volume_ids", [])]
         if set(details) != set(unexpected):
             raise IndexRepairError("upstream volume status did not provide unambiguous repair metadata")
+        repair_limit = int(self.config.seaweed.index_repair_max_volumes)
+        if len(unexpected) > repair_limit:
+            raise IndexRepairManualIntervention(
+                f"refusing automatic index repair for {len(unexpected)} volumes; "
+                f"configured safety limit is {repair_limit}"
+            )
         failures: list[str] = []
         def repair_volume(volume_id: int) -> None:
             with self._active_lock:
@@ -706,6 +715,15 @@ class IndexRepairController:
                 "size": int(built["candidate_size"]),
                 "sha256": str(built["candidate_sha256"]),
             }
+        except IndexRepairManualIntervention as exc:
+            reason = str(exc)
+            self._manual(
+                transaction,
+                reason,
+                unsafe_candidate=True,
+                candidate_installed=False,
+            )
+            raise
         except (IndexRepairError, KeyError, OSError, TypeError, ValueError) as exc:
             reason = str(exc)
             self._record_preinstall_failure(transaction, reason)

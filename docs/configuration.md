@@ -282,6 +282,7 @@ The selected target becomes SeaweedFS `-dir.idx`. Indexes must remain persistent
 | `all_readonly_wait_seconds` | `75` | Minimum observation time before rejecting a persistent all-volume read-only startup state without repair |
 | `auto_index_repair_enabled` | `true` | Reconstruct unexpected read-only `.idx` files during guarded offline recovery |
 | `index_repair_concurrency` | `1` | Maximum simultaneous remote `.dat` scans; valid range is 1–8 |
+| `index_repair_max_volumes` | `2` | Maximum unexpected read-only volumes accepted in one automatic repair incident |
 | `index_repair_timeout_seconds` | `3600` | Per-volume deadline for fingerprinting and `weed fix` reconstruction |
 
 Raw argument arrays are available:
@@ -299,13 +300,13 @@ The bundled appliance supervises one volume server. Keep `default_replication = 
 
 The guardian consumes SeaweedFS's own `ReadOnly` result and does not reproduce its volume-full, sealed, or disk-pressure rules. An upstream read-only ID is unexpected unless it is explicitly listed. Keep the list empty for new deployments. Add an ID only after independent operator certification; never use the list to suppress an index-integrity incident.
 
-Automatic repair requires `volume_health_enabled = true` and is enabled safely by default, including for existing configurations that omit the new settings. Concurrency defaults to one because scans read the complete remote `.dat` and can place sustained load on network storage. Increasing it does not weaken writer shutdown, source read-only exposure, backups, or upstream validation.
+Automatic repair requires `volume_health_enabled = true` and is enabled safely by default, including for existing configurations that omit the new settings. Concurrency defaults to one because scans read the complete remote `.dat` and can place sustained load on network storage. Increasing it does not weaken writer shutdown, source read-only exposure, backups, or upstream validation. The repair incident limit defaults to two. A broader result is treated as evidence of a transport or systemic event, parks the guardian in `MANUAL_INTERVENTION_REQUIRED`, and requires operator investigation rather than automatic index replacement.
 
 An all-volume read-only response is treated as a high-blast-radius startup condition, not as volume-specific evidence of index divergence. The guardian observes it for `all_readonly_wait_seconds`, allowing SeaweedFS's periodic disk-space state to refresh. If the condition clears, normal startup certification continues. If it persists, readiness stays withdrawn and broad automatic repair is refused. A reconstructed candidate that is byte-for-byte identical to its live index is likewise never backed up or installed; the transaction records that index divergence did not explain the upstream state and requires diagnosis instead.
 
 There is no configuration for writing or truncating `.dat`, ignoring `weed fix` errors, skipping backups, accepting a missing volume, or bypassing upstream rejection.
 
-If the official `weed fix` candidate still references a malformed or truncated tail beyond `.dat` EOF, the candidate is rejected and the original indexes are restored. After independent operator certification, that volume may be listed in `expected_readonly_volume_ids` so the readable portion remains available intentionally. Never combine that exception with `weed fix -ignoreError`, and record the reason beside the deployment setting.
+If the official `weed fix` candidate references a malformed or truncated tail beyond `.dat` EOF, a bounds check rejects it before any live index backup or installation. The guardian then remains parked and fail-closed instead of repeatedly rebuilding the unchanged source. After independent operator certification, that volume may be listed in `expected_readonly_volume_ids` so the readable portion remains available intentionally. Never combine that exception with `weed fix -ignoreError`, and record the reason beside the deployment setting.
 
 ## `[s3]`
 

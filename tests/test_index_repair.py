@@ -32,6 +32,7 @@ def make_config(tmp_path: Path) -> SimpleNamespace:
             auto_index_repair_enabled=True,
             binary="/usr/local/bin/weed",
             index_repair_concurrency=1,
+            index_repair_max_volumes=2,
             index_repair_timeout_seconds=30,
         ),
     )
@@ -168,6 +169,45 @@ def test_identical_candidate_is_not_installed_or_backed_up(tmp_path: Path) -> No
     assert "backup_idx_path" not in transaction
 
 
+def test_unsafe_candidate_parks_immediately_without_backup_or_install(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    source = config.volume_path / "photos_1.dat"
+    source.write_bytes(b"source")
+    live_idx = config.index_path / "photos_1.idx"
+    live_idx.write_bytes(b"old-index")
+    controller = IndexRepairController(config, HealthState())
+    controller.prepare_offline()
+    source_fingerprint = raw_fingerprint()
+
+    def run_helper(**kwargs):
+        if kwargs["fingerprint_only"]:
+            return {
+                "success": True,
+                "source_fingerprint_before": source_fingerprint,
+                "source_fingerprint_after": source_fingerprint,
+                "readonly_mount_verified": True,
+                "write_rejected": True,
+            }
+        raise IndexRepairManualIntervention(
+            "candidate index references bytes past authoritative .dat EOF"
+        )
+
+    controller._run_helper = run_helper  # type: ignore[method-assign]
+
+    with pytest.raises(IndexRepairManualIntervention, match="past authoritative"):
+        controller.repair_detected(
+            status(), generation_id=7, active_transport="cifs-primary",
+            generation_failure_cause="seaweed_volume_health_failure",
+        )
+
+    assert live_idx.read_bytes() == b"old-index"
+    transaction = controller.journal.load_all()[0]
+    assert transaction["phase"] == "manual_intervention_required"
+    assert transaction["unsafe_candidate"] is True
+    assert transaction["candidate_installed"] is False
+    assert "backup_idx_path" not in transaction
+
+
 def test_global_readonly_status_is_rejected_before_any_repair_transaction(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     controller = IndexRepairController(config, HealthState())
@@ -187,6 +227,32 @@ def test_global_readonly_status_is_rejected_before_any_repair_transaction(tmp_pa
     with pytest.raises(IndexRepairManualIntervention, match="every upstream volume"):
         controller.repair_detected(
             global_status, generation_id=8, active_transport="cifs-primary",
+            generation_failure_cause="seaweed_volume_health_failure",
+        )
+
+    assert controller.journal.load_all() == []
+
+
+def test_repair_budget_rejects_broad_incident_before_any_transaction(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    config.seaweed.index_repair_max_volumes = 2
+    controller = IndexRepairController(config, HealthState())
+    controller.prepare_offline()
+    broad_status = {
+        "total": 10,
+        "readonly": 3,
+        "writable": 7,
+        "unexpected_readonly_volume_ids": [1, 2, 3],
+        "volume_details": [
+            {"id": volume_id, "collection": "photos", "readonly": volume_id <= 3,
+             "expected_readonly": False}
+            for volume_id in range(1, 11)
+        ],
+    }
+
+    with pytest.raises(IndexRepairManualIntervention, match="configured safety limit is 2"):
+        controller.repair_detected(
+            broad_status, generation_id=9, active_transport="cifs-primary",
             generation_failure_cause="seaweed_volume_health_failure",
         )
 
@@ -495,6 +561,12 @@ def test_health_metrics_include_repair_counters() -> None:
     assert "s3_storage_node_index_repairs_resolved_without_install_total 1" in metrics
     assert "s3_storage_node_index_repair_pending 2" in metrics
     assert "s3_storage_node_index_repair_current_volume 2" in metrics
+    assert "s3_storage_node_manual_intervention_required 0" in metrics
+
+    health.set("MANUAL_INTERVENTION_REQUIRED", False, "operator review required")
+    lines.clear()
+    Handler._metrics(handler, health.snapshot())
+    assert "s3_storage_node_manual_intervention_required 1" in lines[0].decode()
 
 
 def test_structurally_invalid_journal_is_rejected(tmp_path: Path) -> None:
