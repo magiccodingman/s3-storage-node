@@ -182,6 +182,10 @@ class Handler(BaseHTTPRequestHandler):
             f"s3_storage_node_failures_total {snapshot['failures_total']}",
             "# TYPE s3_storage_node_recovery_attempts counter",
             f"s3_storage_node_recovery_attempts {snapshot['recovery_attempts']}",
+            "# HELP s3_storage_node_manual_intervention_required Whether recovery is parked for operator review.",
+            "# TYPE s3_storage_node_manual_intervention_required gauge",
+            "s3_storage_node_manual_intervention_required "
+            f"{1 if snapshot['state'] == 'MANUAL_INTERVENTION_REQUIRED' else 0}",
             "# TYPE s3_storage_node_consecutive_probe_successes gauge",
             f"s3_storage_node_consecutive_probe_successes {snapshot['consecutive_probe_successes']}",
             "# TYPE s3_storage_node_last_probe_duration_seconds gauge",

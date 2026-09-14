@@ -9,7 +9,11 @@ import pytest
 
 from s3_storage_node.generation import GenerationError, GenerationFactory, LocalWriterLease, WorkerGeneration
 from s3_storage_node.generation_guardian import Guardian
-from s3_storage_node.index_repair import IndexRepairError, IndexValidationRequired
+from s3_storage_node.index_repair import (
+    IndexRepairError,
+    IndexRepairManualIntervention,
+    IndexValidationRequired,
+)
 from s3_storage_node.render import render_haproxy
 from s3_storage_node.seaweed_health import UnexpectedReadonlyVolumes
 
@@ -308,3 +312,32 @@ def test_repair_never_starts_when_a_writer_misses_shutdown_deadline(tmp_path: Pa
         guardian._start_seaweed_with_index_recovery()
 
     controller.repair_detected.assert_not_called()
+
+
+def test_manual_repair_failure_fences_once_and_parks_until_shutdown(tmp_path: Path) -> None:
+    guardian = make_guardian(tmp_path)
+    guardian.generation = Mock(generation=88)
+    guardian._terminate_generation = Mock(return_value=True)
+    guardian._retire_generation = Mock(side_effect=lambda: setattr(guardian, "generation", None))
+    sleeps: list[int] = []
+
+    def stop_after_one_sleep(seconds: int) -> None:
+        sleeps.append(seconds)
+        guardian.stopping = True
+
+    guardian._interruptible_sleep = stop_after_one_sleep  # type: ignore[method-assign]
+    error = IndexRepairManualIntervention("candidate requires operator review")
+
+    guardian._park_manual_intervention(
+        error, phase="REPAIRING_INDEXES", cause="seaweed_index_repair_failure",
+    )
+
+    guardian._terminate_generation.assert_called_once_with(
+        str(error), cause="seaweed_index_repair_failure", phase="REPAIRING_INDEXES",
+    )
+    guardian._retire_generation.assert_called_once()
+    assert sleeps == [1]
+    snapshot = guardian.health.snapshot()
+    assert snapshot["state"] == "MANUAL_INTERVENTION_REQUIRED"
+    assert snapshot["ready"] is False
+    assert snapshot["failures_total"] == 1
