@@ -199,6 +199,9 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         index_repair_concurrency=_int(
             seaweed_raw.get("index_repair_concurrency"), "seaweed.index_repair_concurrency", 1,
         ),
+        index_repair_max_volumes=_int(
+            seaweed_raw.get("index_repair_max_volumes"), "seaweed.index_repair_max_volumes", 2,
+        ),
         index_repair_timeout_seconds=_int(
             seaweed_raw.get("index_repair_timeout_seconds"), "seaweed.index_repair_timeout_seconds", 3600,
         ),
@@ -212,6 +215,7 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         raise ConfigError("seaweed.expected_readonly_volume_ids must not contain duplicates")
     _positive(seaweed.all_readonly_wait_seconds, "seaweed.all_readonly_wait_seconds")
     _positive(seaweed.index_repair_concurrency, "seaweed.index_repair_concurrency")
+    _positive(seaweed.index_repair_max_volumes, "seaweed.index_repair_max_volumes")
     _positive(seaweed.index_repair_timeout_seconds, "seaweed.index_repair_timeout_seconds")
     if seaweed.index_repair_concurrency > 8:
         raise ConfigError("seaweed.index_repair_concurrency may not exceed 8")

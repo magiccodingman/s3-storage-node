@@ -12,10 +12,77 @@ from typing import Any
 
 
 FINGERPRINT_REGION_BYTES = 1024 * 1024
+NEEDLE_MAP_ENTRY_BYTES = 16
+NEEDLE_HEADER_BYTES = 16
+NEEDLE_CHECKSUM_BYTES = 4
+NEEDLE_TIMESTAMP_BYTES = 8
+NEEDLE_PADDING_BYTES = 8
 
 
 class RepairHelperError(RuntimeError):
     pass
+
+
+def _needle_actual_size(size: int, version: int) -> int:
+    """Match SeaweedFS needle.GetActualSize for an on-disk index entry."""
+
+    payload_size = 0 if size < 0 else size
+    trailer_size = NEEDLE_CHECKSUM_BYTES + (NEEDLE_TIMESTAMP_BYTES if version == 3 else 0)
+    unpadded = NEEDLE_HEADER_BYTES + payload_size + trailer_size
+    padding = NEEDLE_PADDING_BYTES - (unpadded % NEEDLE_PADDING_BYTES)
+    return unpadded + padding
+
+
+def inspect_index_bounds(index: Path, source: Path) -> dict[str, Any]:
+    """Prove that every live candidate entry is physically contained in .dat."""
+
+    source_info = source.stat()
+    with source.open("rb", buffering=0) as handle:
+        version_raw = handle.read(1)
+    if not version_raw or version_raw[0] not in {1, 2, 3}:
+        raise RepairHelperError(f"unsupported or missing SeaweedFS superblock in {source}")
+    version = version_raw[0]
+    index_size = index.stat().st_size
+    if index_size % NEEDLE_MAP_ENTRY_BYTES:
+        raise RepairHelperError(
+            f"candidate index size {index_size} is not a multiple of {NEEDLE_MAP_ENTRY_BYTES}"
+        )
+
+    entry_count = 0
+    max_end = 0
+    violations: list[dict[str, int]] = []
+    with index.open("rb", buffering=0) as handle:
+        while record := handle.read(NEEDLE_MAP_ENTRY_BYTES):
+            if len(record) != NEEDLE_MAP_ENTRY_BYTES:
+                raise RepairHelperError("candidate index ended with a partial entry")
+            entry_count += 1
+            needle_id = int.from_bytes(record[0:8], "big", signed=False)
+            offset = int.from_bytes(record[8:12], "big", signed=False) * NEEDLE_PADDING_BYTES
+            size = int.from_bytes(record[12:16], "big", signed=True)
+            # SeaweedFS MaximumNeedleEnd deliberately ignores tombstones,
+            # zero-sized values, and offset-zero remote-tier markers.
+            if offset == 0 or size <= 0:
+                continue
+            end = offset + _needle_actual_size(size, version)
+            max_end = max(max_end, end)
+            if end > source_info.st_size:
+                violations.append({
+                    "needle_id": needle_id,
+                    "offset": offset,
+                    "size": size,
+                    "end": end,
+                    "bytes_past_eof": end - source_info.st_size,
+                })
+
+    return {
+        "version": version,
+        "source_size": source_info.st_size,
+        "index_size": index_size,
+        "entry_count": entry_count,
+        "maximum_needle_end": max_end,
+        "violations": violations,
+        "valid": not violations,
+    }
 
 
 def fingerprint(path: Path, region_bytes: int = FINGERPRINT_REGION_BYTES) -> dict[str, Any]:
@@ -216,6 +283,16 @@ def build_candidate(args: argparse.Namespace) -> dict[str, Any]:
             )
         if not candidate.is_file() or candidate.is_symlink():
             raise RepairHelperError(f"weed fix did not create the expected candidate: {candidate}")
+        bounds = inspect_index_bounds(candidate, source)
+        result["candidate_bounds"] = bounds
+        if not bounds["valid"]:
+            candidate.unlink(missing_ok=True)
+            first = bounds["violations"][0]
+            result["manual_intervention_required"] = True
+            raise RepairHelperError(
+                "candidate index references bytes past authoritative .dat EOF: "
+                f"needle {first['needle_id']} ends {first['bytes_past_eof']} bytes past EOF"
+            )
         with candidate.open("rb") as handle:
             candidate_hash = hashlib.file_digest(handle, "sha256").hexdigest()
             os.fsync(handle.fileno())

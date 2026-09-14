@@ -70,6 +70,7 @@ def test_loads_valid_path_configuration(tmp_path: Path) -> None:
     assert config.seaweed.all_readonly_wait_seconds == 75
     assert config.seaweed.auto_index_repair_enabled is True
     assert config.seaweed.index_repair_concurrency == 1
+    assert config.seaweed.index_repair_max_volumes == 2
     assert config.seaweed.index_repair_timeout_seconds == 3600
 
 
@@ -252,6 +253,7 @@ def test_expected_readonly_volume_ids_are_validated(tmp_path: Path, value: str) 
     [
         ("index_repair_concurrency", "0"),
         ("index_repair_concurrency", "9"),
+        ("index_repair_max_volumes", "0"),
         ("index_repair_timeout_seconds", "0"),
     ],
 )
