@@ -6,7 +6,7 @@ health_host = "0.0.0.0"
 health_port = 9090
 probe_interval_seconds = 5
 full_probe_interval_seconds = 60
-probe_timeout_seconds = 60
+probe_timeout_seconds = 15
 startup_timeout_seconds = 30
 shutdown_grace_seconds = 45
 recovery_initial_seconds = 5
@@ -111,6 +111,10 @@ auto_index_repair_enabled = true
 index_repair_concurrency = 1
 index_repair_max_volumes = 2
 index_repair_timeout_seconds = 3600
+auto_tail_recovery_enabled = false
+auto_tail_recovery_max_bytes = 16777216
+concurrent_upload_limit_mb = 32
+inflight_upload_timeout_seconds = 15
 master_port = 9333
 volume_port = 8080
 filer_port = 8888
@@ -148,13 +152,12 @@ secret_key_file = "/run/secrets/s3_secret_key"
 tls_mode = "off"
 tls_pem_file = ""
 
-# Aggregate admission budget shared by reads, writes, lists, and metadata calls.
-# The shared ceiling prevents mixed traffic from bypassing the storage safety cap.
-# Requests above max_active_requests wait in HAProxy until a slot opens. Once the
-# bounded queue is full, or a request waits longer than queue_timeout_seconds,
-# HAProxy returns a retryable HTTP 503 without marking the storage transport failed.
+# Independent read/write budgets keep bulk uploads from starving recovery reads.
+# Excess requests wait in bounded queues and receive a retryable 503 on overflow.
 [s3.admission]
 enabled = true
-max_active_requests = 32
-max_queued_requests = 128
-queue_timeout_seconds = 30
+max_active_read_requests = 16
+max_active_write_requests = 2
+max_queued_read_requests = 32
+max_queued_write_requests = 16
+queue_timeout_seconds = 10

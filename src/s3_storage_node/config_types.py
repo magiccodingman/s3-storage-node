@@ -56,7 +56,7 @@ class ApplianceConfig:
     health_port: int = 9090
     probe_interval_seconds: int = 5
     full_probe_interval_seconds: int = 60
-    probe_timeout_seconds: int = 60
+    probe_timeout_seconds: int = 15
     startup_timeout_seconds: int = 30
     shutdown_grace_seconds: int = 45
     recovery_initial_seconds: int = 5
@@ -119,14 +119,20 @@ class SeaweedConfig:
     index_repair_concurrency: int = 1
     index_repair_max_volumes: int = 2
     index_repair_timeout_seconds: int = 3600
+    auto_tail_recovery_enabled: bool = False
+    auto_tail_recovery_max_bytes: int = 16777216
+    concurrent_upload_limit_mb: int = 32
+    inflight_upload_timeout_seconds: int = 15
 
 
 @dataclass(frozen=True)
 class S3AdmissionConfig:
     enabled: bool = True
-    max_active_requests: int = 32
-    max_queued_requests: int = 128
-    queue_timeout_seconds: int = 30
+    max_active_read_requests: int = 16
+    max_active_write_requests: int = 2
+    max_queued_read_requests: int = 32
+    max_queued_write_requests: int = 16
+    queue_timeout_seconds: int = 10
 
 
 @dataclass(frozen=True)

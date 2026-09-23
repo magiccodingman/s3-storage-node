@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from s3_storage_node.index_repair import (
     IndexRepairManualIntervention,
     RepairJournal,
 )
+from s3_storage_node.index_repair_helper import fingerprint
 
 
 def make_config(tmp_path: Path) -> SimpleNamespace:
@@ -34,6 +36,8 @@ def make_config(tmp_path: Path) -> SimpleNamespace:
             index_repair_concurrency=1,
             index_repair_max_volumes=2,
             index_repair_timeout_seconds=30,
+            auto_tail_recovery_enabled=False,
+            auto_tail_recovery_max_bytes=16 * 1024 * 1024,
         ),
     )
 
@@ -206,6 +210,80 @@ def test_unsafe_candidate_parks_immediately_without_backup_or_install(tmp_path: 
     assert transaction["unsafe_candidate"] is True
     assert transaction["candidate_installed"] is False
     assert "backup_idx_path" not in transaction
+
+
+def test_proven_single_incomplete_tail_is_preserved_and_removed(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    config.seaweed.auto_tail_recovery_enabled = True
+    source = config.volume_path / "photos_1.dat"
+    source.write_bytes(bytes([3]) + bytes(99))
+    live_idx = config.index_path / "photos_1.idx"
+    live_idx.write_bytes(struct.pack(">QIi", 7, 1, 1))
+    controller = IndexRepairController(config, HealthState())
+    controller.prepare_offline()
+    expected = controller._enrich_fingerprint(
+        fingerprint(source), dataset="dataset-1", transport="cifs-primary",
+        collection="photos", volume_id=1,
+    )
+    transaction = controller.journal.create({
+        "generation_id": 8,
+        "active_transport": "cifs-primary",
+        "collection": "photos",
+        "volume_id": 1,
+        "base_name": "photos_1",
+        "source_fingerprint": expected,
+    })
+    payload = {"candidate_bounds": {
+        "source_size": 100,
+        "maximum_entry_offset": 96,
+        "maximum_valid_needle_end": 48,
+        "violations": [{
+            "needle_id": 99, "offset": 96, "size": 9,
+            "end": 136, "bytes_past_eof": 36,
+        }],
+    }}
+
+    recovered = controller._recover_incomplete_tail(
+        transaction=transaction, source=source, live_idx=live_idx,
+        expected_fingerprint=expected, payload=payload,
+    )
+
+    assert recovered is True
+    assert source.stat().st_size == 96
+    tail = Path(transaction["incomplete_tail"]["backup_path"])
+    assert tail.read_bytes() == bytes(4)
+    assert transaction["phase"] == "tail_recovered"
+
+
+def test_tail_recovery_refuses_nonfinal_or_multiple_violations(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    config.seaweed.auto_tail_recovery_enabled = True
+    source = config.volume_path / "photos_1.dat"
+    source.write_bytes(bytes([3]) + bytes(99))
+    live_idx = config.index_path / "photos_1.idx"
+    live_idx.write_bytes(struct.pack(">QIi", 7, 1, 1))
+    controller = IndexRepairController(config, HealthState())
+    controller.prepare_offline()
+    expected = controller._enrich_fingerprint(
+        fingerprint(source), dataset="dataset-1", transport="cifs-primary",
+        collection="photos", volume_id=1,
+    )
+    transaction = controller.journal.create({
+        "active_transport": "cifs-primary", "collection": "photos",
+        "volume_id": 1, "base_name": "photos_1", "source_fingerprint": expected,
+    })
+    violation = {"needle_id": 99, "offset": 96, "size": 9, "end": 136, "bytes_past_eof": 36}
+
+    recovered = controller._recover_incomplete_tail(
+        transaction=transaction, source=source, live_idx=live_idx,
+        expected_fingerprint=expected, payload={"candidate_bounds": {
+            "source_size": 100, "maximum_entry_offset": 96,
+            "maximum_valid_needle_end": 48, "violations": [violation, violation],
+        }},
+    )
+
+    assert recovered is False
+    assert source.stat().st_size == 100
 
 
 def test_global_readonly_status_is_rejected_before_any_repair_transaction(tmp_path: Path) -> None:

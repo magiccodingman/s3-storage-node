@@ -15,11 +15,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
+from .index_repair_helper import fingerprint, inspect_index_bounds
 from .logging import event
 from .seaweed_health import all_volumes_readonly
 
 
-TERMINAL_PHASES = {"verified", "manual_intervention_required", "resolved_without_install"}
+TERMINAL_PHASES = {"verified", "manual_intervention_required", "resolved_without_install", "tail_recovered"}
 PENDING_VALIDATION_PHASES = {"candidate_installed", "awaiting_upstream_validation"}
 PREINSTALL_PHASES = {
     "detected", "writers_stopped", "source_mounted_readonly", "candidate_building",
@@ -38,6 +39,12 @@ class IndexRepairJournalError(IndexRepairError):
 
 class IndexRepairManualIntervention(IndexRepairError):
     pass
+
+
+class IndexRepairUnsafeCandidate(IndexRepairManualIntervention):
+    def __init__(self, message: str, payload: dict[str, Any]) -> None:
+        self.payload = payload
+        super().__init__(message)
 
 
 class IndexValidationRequired(IndexRepairError):
@@ -432,7 +439,7 @@ class IndexRepairController:
         if process.returncode != 0 or not payload.get("success"):
             error = str(payload.get("error") or stderr.strip() or "index repair helper failed")
             if payload.get("manual_intervention_required"):
-                raise IndexRepairManualIntervention(error)
+                raise IndexRepairUnsafeCandidate(error, payload)
             raise IndexRepairError(error)
         return payload
 
@@ -715,6 +722,23 @@ class IndexRepairController:
                 "size": int(built["candidate_size"]),
                 "sha256": str(built["candidate_sha256"]),
             }
+        except IndexRepairUnsafeCandidate as exc:
+            if self._recover_incomplete_tail(
+                transaction=transaction,
+                source=source,
+                live_idx=live_idx,
+                expected_fingerprint=source_fingerprint,
+                payload=exc.payload,
+            ):
+                return self._repair_one(
+                    detail,
+                    generation_id=generation_id,
+                    active_transport=active_transport,
+                    generation_failure_cause=generation_failure_cause,
+                )
+            reason = str(exc)
+            self._manual(transaction, reason, unsafe_candidate=True, candidate_installed=False)
+            raise
         except IndexRepairManualIntervention as exc:
             reason = str(exc)
             self._manual(
@@ -750,6 +774,119 @@ class IndexRepairController:
         self.journal.transition(transaction, "candidate_built")
         self._create_backups(transaction)
         self._install_candidate(transaction)
+
+    def _recover_incomplete_tail(
+        self,
+        *,
+        transaction: dict[str, Any],
+        source: Path,
+        live_idx: Path,
+        expected_fingerprint: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> bool:
+        """Remove one proven incomplete final record after preserving its exact bytes."""
+
+        if not bool(getattr(self.config.seaweed, "auto_tail_recovery_enabled", False)):
+            return False
+        bounds = payload.get("candidate_bounds")
+        if not isinstance(bounds, dict):
+            return False
+        violations = bounds.get("violations")
+        if not isinstance(violations, list) or len(violations) != 1:
+            return False
+        violation = violations[0]
+        if not isinstance(violation, dict):
+            return False
+        try:
+            offset = int(violation["offset"])
+            source_size = int(bounds["source_size"])
+            maximum_entry_offset = int(bounds["maximum_entry_offset"])
+            maximum_valid_end = int(bounds["maximum_valid_needle_end"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        tail_size = source_size - offset
+        if (
+            offset <= 0
+            or tail_size <= 0
+            or tail_size > int(getattr(self.config.seaweed, "auto_tail_recovery_max_bytes", 16777216))
+            or maximum_entry_offset != offset
+            or maximum_valid_end > offset
+        ):
+            return False
+        live_bounds = inspect_index_bounds(live_idx, source)
+        if not live_bounds["valid"] or int(live_bounds["maximum_needle_end"]) > offset:
+            return False
+        current = self._enrich_fingerprint(
+            fingerprint(source),
+            dataset=self.config.data_target.sentinel_id,
+            transport=str(transaction["active_transport"]),
+            collection=str(transaction["collection"]),
+            volume_id=int(transaction["volume_id"]),
+        )
+        if current != expected_fingerprint:
+            return False
+
+        backup_dir = self.journal.backup_dir / str(transaction["transaction_id"])
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(backup_dir, 0o700)
+        tail_path = backup_dir / f"{transaction['base_name']}.incomplete-tail"
+        with source.open("rb", buffering=0) as source_handle:
+            source_handle.seek(offset)
+            tail = source_handle.read(tail_size + 1)
+        if len(tail) != tail_size:
+            return False
+        tail_hash = hashlib.sha256(tail).hexdigest()
+        if tail_path.exists():
+            existing_tail = _hash_file(tail_path)
+            if existing_tail["size"] != tail_size or existing_tail["sha256"] != tail_hash:
+                return False
+        else:
+            with tail_path.open("xb") as backup_handle:
+                backup_handle.write(tail)
+                backup_handle.flush()
+                os.fsync(backup_handle.fileno())
+            os.chmod(tail_path, 0o600)
+            _fsync_directory(backup_dir)
+        if _hash_file(tail_path)["sha256"] != tail_hash:
+            return False
+        if self._enrich_fingerprint(
+            fingerprint(source),
+            dataset=self.config.data_target.sentinel_id,
+            transport=str(transaction["active_transport"]),
+            collection=str(transaction["collection"]),
+            volume_id=int(transaction["volume_id"]),
+        ) != expected_fingerprint:
+            return False
+        with source.open("r+b", buffering=0) as source_handle:
+            source_handle.truncate(offset)
+            source_handle.flush()
+            os.fsync(source_handle.fileno())
+        recovered_fingerprint = self._enrich_fingerprint(
+            fingerprint(source),
+            dataset=self.config.data_target.sentinel_id,
+            transport=str(transaction["active_transport"]),
+            collection=str(transaction["collection"]),
+            volume_id=int(transaction["volume_id"]),
+        )
+        if int(recovered_fingerprint["size"]) != offset:
+            raise IndexRepairManualIntervention("incomplete-tail truncation did not reach the proven boundary")
+        transaction["incomplete_tail"] = {
+            "offset": offset,
+            "size": tail_size,
+            "sha256": tail_hash,
+            "backup_path": str(tail_path),
+            "needle_id": int(violation["needle_id"]),
+        }
+        transaction["recovered_source_fingerprint"] = recovered_fingerprint
+        self.journal.transition(
+            transaction, "tail_recovered", success=True, candidate_installed=False,
+        )
+        event(
+            "warning", "index_repair_incomplete_tail_recovered",
+            volume_id=int(transaction["volume_id"]), offset=offset,
+            tail_size=tail_size, tail_sha256=tail_hash,
+        )
+        return True
 
     def _record_preinstall_failure(self, transaction: dict[str, Any], reason: str) -> None:
         self.journal.transition(transaction, "failed_preinstall", failure_reason=reason)

@@ -22,7 +22,7 @@ The sample file at `config/config.toml.example` is the recommended starting poin
 | `health_port` | `9090` | Health and Prometheus port |
 | `probe_interval_seconds` | `5` | Fast online storage-probe cadence |
 | `full_probe_interval_seconds` | `60` | Full durability and S3-canary cadence while online |
-| `probe_timeout_seconds` | `60` | Deadline for a storage probe subprocess; accommodates bounded remote-storage reconnect stalls |
+| `probe_timeout_seconds` | `15` | Deadline for a storage probe subprocess before new traffic is fenced from a stalled backend |
 | `startup_timeout_seconds` | `30` | Mount/helper and per-process startup deadline |
 | `shutdown_grace_seconds` | `45` | One global SeaweedFS drain deadline before hard-fence fallback |
 | `recovery_initial_seconds` | `5` | Initial recovery retry delay |
@@ -284,6 +284,10 @@ The selected target becomes SeaweedFS `-dir.idx`. Indexes must remain persistent
 | `index_repair_concurrency` | `1` | Maximum simultaneous remote `.dat` scans; valid range is 1–8 |
 | `index_repair_max_volumes` | `2` | Maximum unexpected read-only volumes accepted in one automatic repair incident |
 | `index_repair_timeout_seconds` | `3600` | Per-volume deadline for fingerprinting and `weed fix` reconstruction |
+| `auto_tail_recovery_enabled` | `false` | Permit guarded recovery of one proven incomplete final record; opt in explicitly |
+| `auto_tail_recovery_max_bytes` | `16777216` | Maximum incomplete tail preserved and removed automatically |
+| `concurrent_upload_limit_mb` | `32` | SeaweedFS volume-server aggregate upload-data budget |
+| `inflight_upload_timeout_seconds` | `15` | Maximum wait for SeaweedFS in-flight upload data |
 
 Raw argument arrays are available:
 
@@ -304,9 +308,9 @@ Automatic repair requires `volume_health_enabled = true` and is enabled safely b
 
 An all-volume read-only response is treated as a high-blast-radius startup condition, not as volume-specific evidence of index divergence. The guardian observes it for `all_readonly_wait_seconds`, allowing SeaweedFS's periodic disk-space state to refresh. If the condition clears, normal startup certification continues. If it persists, readiness stays withdrawn and broad automatic repair is refused. A reconstructed candidate that is byte-for-byte identical to its live index is likewise never backed up or installed; the transaction records that index divergence did not explain the upstream state and requires diagnosis instead.
 
-There is no configuration for writing or truncating `.dat`, ignoring `weed fix` errors, skipping backups, accepting a missing volume, or bypassing upstream rejection.
+There is no configuration for ignoring `weed fix` errors, skipping backups, accepting a missing volume, or bypassing upstream rejection. Automatic tail recovery is disabled by default and is the only guarded `.dat` mutation path.
 
-If the official `weed fix` candidate references a malformed or truncated tail beyond `.dat` EOF, a bounds check rejects it before any live index backup or installation. The guardian then remains parked and fail-closed instead of repeatedly rebuilding the unchanged source. After independent operator certification, that volume may be listed in `expected_readonly_volume_ids` so the readable portion remains available intentionally. Never combine that exception with `weed fix -ignoreError`, and record the reason beside the deployment setting.
+If tail recovery is disabled, a candidate referencing bytes beyond `.dat` EOF is rejected before installation. When explicitly enabled, recovery proceeds only for exactly one incomplete record at the greatest physical offset, when every earlier candidate and live-index entry is contained, the tail is within the configured byte limit, and the source fingerprint remains unchanged. The exact tail is hash-verified and fsynced beneath the repair backup directory before truncation; a second reconstruction and normal upstream validation are still required.
 
 ## `[s3]`
 

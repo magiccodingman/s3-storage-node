@@ -50,6 +50,8 @@ def inspect_index_bounds(index: Path, source: Path) -> dict[str, Any]:
 
     entry_count = 0
     max_end = 0
+    max_valid_end = 0
+    max_entry_offset = 0
     violations: list[dict[str, int]] = []
     with index.open("rb", buffering=0) as handle:
         while record := handle.read(NEEDLE_MAP_ENTRY_BYTES):
@@ -64,6 +66,7 @@ def inspect_index_bounds(index: Path, source: Path) -> dict[str, Any]:
             if offset == 0 or size <= 0:
                 continue
             end = offset + _needle_actual_size(size, version)
+            max_entry_offset = max(max_entry_offset, offset)
             max_end = max(max_end, end)
             if end > source_info.st_size:
                 violations.append({
@@ -73,6 +76,8 @@ def inspect_index_bounds(index: Path, source: Path) -> dict[str, Any]:
                     "end": end,
                     "bytes_past_eof": end - source_info.st_size,
                 })
+            else:
+                max_valid_end = max(max_valid_end, end)
 
     return {
         "version": version,
@@ -80,6 +85,8 @@ def inspect_index_bounds(index: Path, source: Path) -> dict[str, Any]:
         "index_size": index_size,
         "entry_count": entry_count,
         "maximum_needle_end": max_end,
+        "maximum_valid_needle_end": max_valid_end,
+        "maximum_entry_offset": max_entry_offset,
         "violations": violations,
         "valid": not violations,
     }
