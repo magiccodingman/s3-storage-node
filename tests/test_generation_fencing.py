@@ -198,7 +198,7 @@ def test_haproxy_routes_to_worker_namespace_but_checks_root_health(tmp_path: Pat
     )
     path = render_haproxy(config)
     content = path.read_text(encoding="utf-8")
-    assert "server worker_s3 169.254.254.2:18333" in content
+    assert "server worker_s3_write 169.254.254.2:18333" in content
     assert "check addr 127.0.0.1 port 9090" in content
 
 

@@ -77,7 +77,7 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         health_port=_int(appliance_raw.get("health_port"), "appliance.health_port", 9090),
         probe_interval_seconds=_int(appliance_raw.get("probe_interval_seconds"), "appliance.probe_interval_seconds", 5),
         full_probe_interval_seconds=_int(appliance_raw.get("full_probe_interval_seconds"), "appliance.full_probe_interval_seconds", 60),
-        probe_timeout_seconds=_int(appliance_raw.get("probe_timeout_seconds"), "appliance.probe_timeout_seconds", 60),
+        probe_timeout_seconds=_int(appliance_raw.get("probe_timeout_seconds"), "appliance.probe_timeout_seconds", 15),
         startup_timeout_seconds=_int(appliance_raw.get("startup_timeout_seconds"), "appliance.startup_timeout_seconds", 30),
         shutdown_grace_seconds=_int(appliance_raw.get("shutdown_grace_seconds"), "appliance.shutdown_grace_seconds", 45),
         recovery_initial_seconds=_int(appliance_raw.get("recovery_initial_seconds"), "appliance.recovery_initial_seconds", 5),
@@ -205,6 +205,21 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         index_repair_timeout_seconds=_int(
             seaweed_raw.get("index_repair_timeout_seconds"), "seaweed.index_repair_timeout_seconds", 3600,
         ),
+        auto_tail_recovery_enabled=_bool(
+            seaweed_raw.get("auto_tail_recovery_enabled"),
+            "seaweed.auto_tail_recovery_enabled", False,
+        ),
+        auto_tail_recovery_max_bytes=_int(
+            seaweed_raw.get("auto_tail_recovery_max_bytes"),
+            "seaweed.auto_tail_recovery_max_bytes", 16777216,
+        ),
+        concurrent_upload_limit_mb=_int(
+            seaweed_raw.get("concurrent_upload_limit_mb"), "seaweed.concurrent_upload_limit_mb", 32,
+        ),
+        inflight_upload_timeout_seconds=_int(
+            seaweed_raw.get("inflight_upload_timeout_seconds"),
+            "seaweed.inflight_upload_timeout_seconds", 15,
+        ),
     )
     for field_name in ("master_port", "volume_port", "filer_port", "s3_internal_port", "volume_size_limit_mb", "filer_max_mb"):
         _positive(getattr(seaweed, field_name), f"seaweed.{field_name}")
@@ -217,6 +232,9 @@ def load_config(path: str | os.PathLike[str]) -> Config:
     _positive(seaweed.index_repair_concurrency, "seaweed.index_repair_concurrency")
     _positive(seaweed.index_repair_max_volumes, "seaweed.index_repair_max_volumes")
     _positive(seaweed.index_repair_timeout_seconds, "seaweed.index_repair_timeout_seconds")
+    _positive(seaweed.auto_tail_recovery_max_bytes, "seaweed.auto_tail_recovery_max_bytes")
+    _positive(seaweed.concurrent_upload_limit_mb, "seaweed.concurrent_upload_limit_mb")
+    _positive(seaweed.inflight_upload_timeout_seconds, "seaweed.inflight_upload_timeout_seconds")
     if seaweed.index_repair_concurrency > 8:
         raise ConfigError("seaweed.index_repair_concurrency may not exceed 8")
     if seaweed.auto_index_repair_enabled and not seaweed.volume_health_enabled:
@@ -233,24 +251,32 @@ def load_config(path: str | os.PathLike[str]) -> Config:
     admission_raw = _table(s3_raw, "admission")
     admission = S3AdmissionConfig(
         enabled=_bool(admission_raw.get("enabled"), "s3.admission.enabled", True),
-        max_active_requests=_int(
-            admission_raw.get("max_active_requests"),
-            "s3.admission.max_active_requests",
-            32,
+        max_active_read_requests=_int(
+            admission_raw.get("max_active_read_requests"),
+            "s3.admission.max_active_read_requests", 16,
         ),
-        max_queued_requests=_int(
-            admission_raw.get("max_queued_requests"),
-            "s3.admission.max_queued_requests",
-            128,
+        max_active_write_requests=_int(
+            admission_raw.get("max_active_write_requests"),
+            "s3.admission.max_active_write_requests", 2,
+        ),
+        max_queued_read_requests=_int(
+            admission_raw.get("max_queued_read_requests"),
+            "s3.admission.max_queued_read_requests", 32,
+        ),
+        max_queued_write_requests=_int(
+            admission_raw.get("max_queued_write_requests"),
+            "s3.admission.max_queued_write_requests", 16,
         ),
         queue_timeout_seconds=_int(
             admission_raw.get("queue_timeout_seconds"),
             "s3.admission.queue_timeout_seconds",
-            30,
+            10,
         ),
     )
-    _positive(admission.max_active_requests, "s3.admission.max_active_requests")
-    _positive(admission.max_queued_requests, "s3.admission.max_queued_requests")
+    _positive(admission.max_active_read_requests, "s3.admission.max_active_read_requests")
+    _positive(admission.max_active_write_requests, "s3.admission.max_active_write_requests")
+    _positive(admission.max_queued_read_requests, "s3.admission.max_queued_read_requests")
+    _positive(admission.max_queued_write_requests, "s3.admission.max_queued_write_requests")
     _positive(admission.queue_timeout_seconds, "s3.admission.queue_timeout_seconds")
 
     s3 = S3Config(

@@ -110,22 +110,44 @@ def render_haproxy(config: Config) -> Path:
         health_host = "127.0.0.1"
 
     admission_frontend = ""
-    admission_backend = ""
-    admission_server = ""
+    backend_content = ""
     if config.s3.admission.enabled:
         admission_frontend = (
-            "  # Reject only after the bounded server queue is full.\n"
-            f"  acl s3_queue_full srv_queue(seaweed_s3/worker_s3) ge {config.s3.admission.max_queued_requests}\n"
-            "  http-request deny deny_status 503 if s3_queue_full\n"
+            "  # Reads and writes use independent budgets so bulk uploads cannot starve recovery reads.\n"
+            "  acl s3_read method GET HEAD OPTIONS\n"
+            f"  acl s3_read_queue_full srv_queue(seaweed_s3_read/worker_s3_read) ge {config.s3.admission.max_queued_read_requests}\n"
+            f"  acl s3_write_queue_full srv_queue(seaweed_s3_write/worker_s3_write) ge {config.s3.admission.max_queued_write_requests}\n"
+            "  http-request deny deny_status 503 if s3_read s3_read_queue_full\n"
+            "  http-request deny deny_status 503 if !s3_read s3_write_queue_full\n"
+            "  use_backend seaweed_s3_read if s3_read\n"
         )
-        admission_backend = (
-            "  # Drop abandoned queued requests and cap how long live clients wait.\n"
+        common = (
             "  option abortonclose\n"
             f"  timeout queue {config.s3.admission.queue_timeout_seconds}s\n"
+            "  option httpchk GET /ready\n"
+            "  http-check expect status 200\n"
         )
-        admission_server = (
-            f" maxconn {config.s3.admission.max_active_requests}"
-            f" maxqueue {config.s3.admission.max_queued_requests}"
+        backend_content = (
+            "backend seaweed_s3_read\n"
+            f"{common}"
+            f"  server worker_s3_read {backend_host}:{config.seaweed.s3_internal_port} check "
+            f"addr {health_host} port {config.appliance.health_port} inter 250ms fall 1 rise 1"
+            f" maxconn {config.s3.admission.max_active_read_requests}"
+            f" maxqueue {config.s3.admission.max_queued_read_requests}\n\n"
+            "backend seaweed_s3_write\n"
+            f"{common}"
+            f"  server worker_s3_write {backend_host}:{config.seaweed.s3_internal_port} check "
+            f"addr {health_host} port {config.appliance.health_port} inter 250ms fall 1 rise 1"
+            f" maxconn {config.s3.admission.max_active_write_requests}"
+            f" maxqueue {config.s3.admission.max_queued_write_requests}\n"
+        )
+    else:
+        backend_content = (
+            "backend seaweed_s3_write\n"
+            "  option httpchk GET /ready\n"
+            "  http-check expect status 200\n"
+            f"  server worker_s3_write {backend_host}:{config.seaweed.s3_internal_port} check "
+            f"addr {health_host} port {config.appliance.health_port} inter 250ms fall 1 rise 1\n"
         )
 
     content = f'''global
@@ -142,12 +164,9 @@ defaults
 
 frontend s3_public
   bind {bind}{tls}
-{admission_frontend}  default_backend seaweed_s3
+{admission_frontend}  default_backend seaweed_s3_write
 
-backend seaweed_s3
-{admission_backend}  option httpchk GET /ready
-  http-check expect status 200
-  server worker_s3 {backend_host}:{config.seaweed.s3_internal_port} check addr {health_host} port {config.appliance.health_port} inter 250ms fall 1 rise 1{admission_server}
+{backend_content}
 '''
     path = config.appliance.runtime_dir / "generated" / "haproxy.cfg"
     write_atomic(path, content, 0o644)

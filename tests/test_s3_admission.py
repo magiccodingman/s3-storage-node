@@ -53,9 +53,11 @@ def test_s3_admission_defaults_are_safe_and_bounded(tmp_path: Path) -> None:
     config = load_config(_write_config(tmp_path))
 
     assert config.s3.admission.enabled is True
-    assert config.s3.admission.max_active_requests == 32
-    assert config.s3.admission.max_queued_requests == 128
-    assert config.s3.admission.queue_timeout_seconds == 30
+    assert config.s3.admission.max_active_read_requests == 16
+    assert config.s3.admission.max_active_write_requests == 2
+    assert config.s3.admission.max_queued_read_requests == 32
+    assert config.s3.admission.max_queued_write_requests == 16
+    assert config.s3.admission.queue_timeout_seconds == 10
 
 
 def test_s3_admission_settings_are_configurable(tmp_path: Path) -> None:
@@ -64,16 +66,20 @@ def test_s3_admission_settings_are_configurable(tmp_path: Path) -> None:
             tmp_path,
             '''[s3.admission]
 enabled = true
-max_active_requests = 24
-max_queued_requests = 96
+max_active_read_requests = 24
+max_active_write_requests = 3
+max_queued_read_requests = 96
+max_queued_write_requests = 12
 queue_timeout_seconds = 15
 ''',
         )
     )
 
     assert config.s3.admission.enabled is True
-    assert config.s3.admission.max_active_requests == 24
-    assert config.s3.admission.max_queued_requests == 96
+    assert config.s3.admission.max_active_read_requests == 24
+    assert config.s3.admission.max_active_write_requests == 3
+    assert config.s3.admission.max_queued_read_requests == 96
+    assert config.s3.admission.max_queued_write_requests == 12
     assert config.s3.admission.queue_timeout_seconds == 15
 
 
@@ -93,8 +99,10 @@ enabled = false
 @pytest.mark.parametrize(
     ("setting", "message"),
     [
-        ("max_active_requests = 0", "s3.admission.max_active_requests"),
-        ("max_queued_requests = 0", "s3.admission.max_queued_requests"),
+        ("max_active_read_requests = 0", "s3.admission.max_active_read_requests"),
+        ("max_active_write_requests = 0", "s3.admission.max_active_write_requests"),
+        ("max_queued_read_requests = 0", "s3.admission.max_queued_read_requests"),
+        ("max_queued_write_requests = 0", "s3.admission.max_queued_write_requests"),
         ("queue_timeout_seconds = 0", "s3.admission.queue_timeout_seconds"),
     ],
 )

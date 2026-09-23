@@ -50,6 +50,8 @@ def inspect_index_bounds(index: Path, source: Path) -> dict[str, Any]:
 
     entry_count = 0
     max_end = 0
+    max_valid_end = 0
+    max_entry_offset = 0
     violations: list[dict[str, int]] = []
     with index.open("rb", buffering=0) as handle:
         while record := handle.read(NEEDLE_MAP_ENTRY_BYTES):
@@ -64,6 +66,7 @@ def inspect_index_bounds(index: Path, source: Path) -> dict[str, Any]:
             if offset == 0 or size <= 0:
                 continue
             end = offset + _needle_actual_size(size, version)
+            max_entry_offset = max(max_entry_offset, offset)
             max_end = max(max_end, end)
             if end > source_info.st_size:
                 violations.append({
@@ -73,6 +76,8 @@ def inspect_index_bounds(index: Path, source: Path) -> dict[str, Any]:
                     "end": end,
                     "bytes_past_eof": end - source_info.st_size,
                 })
+            else:
+                max_valid_end = max(max_valid_end, end)
 
     return {
         "version": version,
@@ -80,6 +85,8 @@ def inspect_index_bounds(index: Path, source: Path) -> dict[str, Any]:
         "index_size": index_size,
         "entry_count": entry_count,
         "maximum_needle_end": max_end,
+        "maximum_valid_needle_end": max_valid_end,
+        "maximum_entry_offset": max_entry_offset,
         "violations": violations,
         "valid": not violations,
     }
@@ -331,6 +338,97 @@ def build_candidate(args: argparse.Namespace) -> dict[str, Any]:
                 result["error"] = f"unable to remove private repair mount directory: {directory}"
 
 
+def recover_incomplete_tail(args: argparse.Namespace) -> dict[str, Any]:
+    """Preserve and remove one independently proven incomplete final record."""
+
+    result = build_candidate(args)
+    bounds = result.get("candidate_bounds")
+    source = Path(args.source_dat)
+    live_index = Path(args.live_index)
+    tail_backup = Path(args.tail_backup)
+    try:
+        expected = json.loads(args.expected_fingerprint)
+        if not isinstance(expected, dict):
+            raise RepairHelperError("expected source fingerprint is not an object")
+        if result.get("success") or not result.get("manual_intervention_required"):
+            raise RepairHelperError("source does not contain a rejected incomplete-tail candidate")
+        if not isinstance(bounds, dict):
+            raise RepairHelperError("candidate bounds are unavailable")
+        violations = bounds.get("violations")
+        if not isinstance(violations, list) or len(violations) != 1:
+            raise RepairHelperError("candidate does not contain exactly one incomplete record")
+        violation = violations[0]
+        if not isinstance(violation, dict):
+            raise RepairHelperError("candidate violation is malformed")
+        offset = int(violation["offset"])
+        source_size = int(bounds["source_size"])
+        tail_size = source_size - offset
+        if (
+            offset <= 0
+            or tail_size <= 0
+            or tail_size > args.maximum_tail_bytes
+            or int(bounds["maximum_entry_offset"]) != offset
+            or int(bounds["maximum_valid_needle_end"]) > offset
+        ):
+            raise RepairHelperError("candidate does not prove a bounded final-record tail")
+        live_bounds = inspect_index_bounds(live_index, source)
+        if not live_bounds["valid"] or int(live_bounds["maximum_needle_end"]) > offset:
+            raise RepairHelperError("live index is inconsistent with the proven tail boundary")
+        if fingerprint(source) != expected:
+            raise RepairHelperError("authoritative source fingerprint changed before tail recovery")
+
+        with source.open("rb", buffering=0) as source_handle:
+            source_handle.seek(offset)
+            tail = source_handle.read(tail_size + 1)
+        if len(tail) != tail_size:
+            raise RepairHelperError("could not read the complete incomplete-record tail")
+        tail_hash = hashlib.sha256(tail).hexdigest()
+        tail_backup.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(tail_backup.parent, 0o700)
+        if tail_backup.is_symlink():
+            raise RepairHelperError("tail backup may not be a symlink")
+        if tail_backup.exists():
+            backup_info = tail_backup.stat()
+            if not stat.S_ISREG(backup_info.st_mode):
+                raise RepairHelperError("tail backup is not a regular file")
+            with tail_backup.open("rb") as backup_handle:
+                existing_hash = hashlib.file_digest(backup_handle, "sha256").hexdigest()
+            if backup_info.st_size != tail_size or existing_hash != tail_hash:
+                raise RepairHelperError("existing tail backup does not match the authoritative tail")
+        else:
+            with tail_backup.open("xb") as backup_handle:
+                backup_handle.write(tail)
+                backup_handle.flush()
+                os.fsync(backup_handle.fileno())
+            os.chmod(tail_backup, 0o600)
+            _fsync_directory(tail_backup.parent)
+        with tail_backup.open("rb") as backup_handle:
+            verified_hash = hashlib.file_digest(backup_handle, "sha256").hexdigest()
+        if verified_hash != tail_hash:
+            raise RepairHelperError("tail backup hash verification failed")
+        if fingerprint(source) != expected:
+            raise RepairHelperError("authoritative source fingerprint changed after tail backup")
+        with source.open("r+b", buffering=0) as source_handle:
+            source_handle.truncate(offset)
+            source_handle.flush()
+            os.fsync(source_handle.fileno())
+        recovered = fingerprint(source)
+        if int(recovered["size"]) != offset:
+            raise RepairHelperError("incomplete-tail truncation did not reach the proven boundary")
+        return {
+            "success": True,
+            "tail_recovered": True,
+            "offset": offset,
+            "tail_size": tail_size,
+            "tail_sha256": tail_hash,
+            "tail_backup": str(tail_backup),
+            "needle_id": int(violation["needle_id"]),
+            "source_fingerprint_after": recovered,
+        }
+    except (OSError, RepairHelperError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return {"success": False, "error": str(exc), "tail_recovered": False}
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="s3-storage-node-index-repair-helper")
     result.add_argument("--source-dat", required=True)
@@ -342,12 +440,17 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--uid", required=True, type=int)
     result.add_argument("--gid", required=True, type=int)
     result.add_argument("--fingerprint-only", action="store_true")
+    result.add_argument("--recover-incomplete-tail", action="store_true")
+    result.add_argument("--live-index", default="")
+    result.add_argument("--tail-backup", default="")
+    result.add_argument("--expected-fingerprint", default="")
+    result.add_argument("--maximum-tail-bytes", type=int, default=0)
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    result = build_candidate(args)
+    result = recover_incomplete_tail(args) if args.recover_incomplete_tail else build_candidate(args)
     print(json.dumps(result, sort_keys=True))
     return 0 if result.get("success") else 1
 

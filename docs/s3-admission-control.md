@@ -7,33 +7,37 @@ The complete sample is available in `config/config.toml.example`. Admission cont
 ```toml
 [s3.admission]
 enabled = true
-max_active_requests = 32
-max_queued_requests = 128
-queue_timeout_seconds = 30
+max_active_read_requests = 16
+max_active_write_requests = 2
+max_queued_read_requests = 32
+max_queued_write_requests = 16
+queue_timeout_seconds = 10
 ```
 
 ## Behavior
 
-The limits form one aggregate budget shared by all S3 request methods, including reads, writes, lists, deletes, multipart operations, and metadata calls.
+The limits form independent read and write budgets. `GET`, `HEAD`, and `OPTIONS` use the read pool. Mutating and metadata methods use the deliberately smaller write pool so a burst of multipart uploads cannot starve health and recovery reads.
 
 With the defaults:
 
-1. Up to 32 requests are forwarded to SeaweedFS concurrently.
-2. Up to 128 additional requests remain pending in HAProxy while they wait for a SeaweedFS slot.
-3. A request that waits longer than 30 seconds receives HTTP `503 Service Unavailable`.
+1. Up to 16 reads and 2 writes are forwarded concurrently.
+2. Up to 32 reads and 16 writes remain pending in their separate HAProxy queues.
+3. A request that waits longer than 10 seconds receives HTTP `503 Service Unavailable`.
 4. A request arriving after the bounded queue is full receives HTTP `503 Service Unavailable` immediately.
 5. A client that disconnects while queued is removed before its request reaches SeaweedFS.
 
-The aggregate ceiling is deliberate. Separate independent limits of 32 reads and 32 writes could expose the storage path to 64 active operations during mixed traffic. One shared active budget prevents that bypass while still applying equally to reads and writes.
+The write ceiling is deliberately low for remote filesystems. SeaweedFS separately caps total volume-server upload data at 32 MiB by default, approximately two configured 16 MiB filer chunks.
 
 ## Configuration reference
 
 | Setting | Default | Meaning |
 |---|---:|---|
 | `enabled` | `true` | Generate HAProxy admission limits for the public S3 endpoint |
-| `max_active_requests` | `32` | Maximum aggregate requests concurrently forwarded to SeaweedFS |
-| `max_queued_requests` | `128` | Maximum additional requests held in the bounded HAProxy queue |
-| `queue_timeout_seconds` | `30` | Maximum time a request may wait for an active slot |
+| `max_active_read_requests` | `16` | Maximum concurrent read-pool requests |
+| `max_active_write_requests` | `2` | Maximum concurrent write-pool requests |
+| `max_queued_read_requests` | `32` | Maximum queued read-pool requests |
+| `max_queued_write_requests` | `16` | Maximum queued write-pool requests |
+| `queue_timeout_seconds` | `10` | Maximum time a request may wait for an active slot |
 
 All numeric settings must be greater than zero. Set `enabled = false` only when another layer provides an equivalent hard active limit and bounded queue.
 
@@ -52,9 +56,9 @@ Clients should treat the returned `503` as retryable and use exponential backoff
 
 ## Choosing limits
 
-Set `max_active_requests` from load testing against the slowest active transport, not from CPU or memory alone. A remote filesystem can become I/O-bound and stop servicing health probes long before the container exhausts RAM.
+Set the active limits from load testing against the slowest active transport, not from CPU or memory alone. A remote filesystem can become I/O-bound and stop servicing health probes long before the container exhausts RAM.
 
-Set `max_queued_requests` large enough to absorb ordinary bursts but small enough that queued work does not create unacceptable tail latency. A larger queue smooths brief spikes; it does not increase backend throughput.
+Set the queue limits large enough to absorb ordinary bursts but small enough that queued work does not create unacceptable tail latency. A larger queue smooths brief spikes; it does not increase backend throughput.
 
 Set `queue_timeout_seconds` to the maximum useful wait before the client should retry elsewhere or later. Keep upstream proxy and SDK timeouts longer than this value.
 

@@ -19,9 +19,11 @@ def _config(tmp_path, *, admission_enabled: bool = True):
             tls_pem_file="",
             admission=SimpleNamespace(
                 enabled=admission_enabled,
-                max_active_requests=32,
-                max_queued_requests=128,
-                queue_timeout_seconds=30,
+                max_active_read_requests=16,
+                max_active_write_requests=2,
+                max_queued_read_requests=32,
+                max_queued_write_requests=16,
+                queue_timeout_seconds=10,
             ),
         ),
         seaweed=SimpleNamespace(s3_internal_port=18333),
@@ -40,11 +42,14 @@ def test_haproxy_uses_guardian_certification_as_single_fast_recovery_gate(tmp_pa
 def test_haproxy_bounds_active_and_queued_s3_requests(tmp_path) -> None:
     rendered = render_haproxy(_config(tmp_path)).read_text(encoding="utf-8")
 
-    assert "acl s3_queue_full srv_queue(seaweed_s3/worker_s3) ge 128" in rendered
-    assert "http-request deny deny_status 503 if s3_queue_full" in rendered
+    assert "acl s3_read method GET HEAD OPTIONS" in rendered
+    assert "srv_queue(seaweed_s3_read/worker_s3_read) ge 32" in rendered
+    assert "srv_queue(seaweed_s3_write/worker_s3_write) ge 16" in rendered
+    assert "use_backend seaweed_s3_read if s3_read" in rendered
     assert "option abortonclose" in rendered
-    assert "timeout queue 30s" in rendered
-    assert "maxconn 32 maxqueue 128" in rendered
+    assert "timeout queue 10s" in rendered
+    assert "maxconn 16 maxqueue 32" in rendered
+    assert "maxconn 2 maxqueue 16" in rendered
 
 
 def test_haproxy_can_disable_s3_admission_limits(tmp_path) -> None:
@@ -52,8 +57,8 @@ def test_haproxy_can_disable_s3_admission_limits(tmp_path) -> None:
         _config(tmp_path, admission_enabled=False)
     ).read_text(encoding="utf-8")
 
-    assert "s3_queue_full" not in rendered
+    assert "s3_read_queue_full" not in rendered
     assert "timeout queue" not in rendered
     assert "option abortonclose" not in rendered
     assert "maxqueue" not in rendered
-    assert "maxconn 32" not in rendered
+    assert "maxconn 16" not in rendered

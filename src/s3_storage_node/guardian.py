@@ -215,6 +215,8 @@ class Guardian:
             f"-dir.idx={config.index_path}",
             f"-max={config.seaweed.volume_max}",
             "-index=memory",
+            f"-concurrentUploadLimitMB={getattr(config.seaweed, 'concurrent_upload_limit_mb', 32)}",
+            f"-inflightUploadDataTimeout={getattr(config.seaweed, 'inflight_upload_timeout_seconds', 15)}s",
         ]
         if config.seaweed.data_center:
             volume.append(f"-dataCenter={config.seaweed.data_center}")
