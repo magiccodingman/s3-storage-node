@@ -587,6 +587,7 @@ class IndexRepairController:
         generation_id: int,
         active_transport: str,
         generation_failure_cause: str,
+        allow_identical_after_tail_recovery: bool = False,
     ) -> None:
         volume_id = int(detail["id"])
         collection = str(detail.get("collection") or "")
@@ -791,6 +792,7 @@ class IndexRepairController:
                     generation_id=generation_id,
                     active_transport=active_transport,
                     generation_failure_cause=generation_failure_cause,
+                    allow_identical_after_tail_recovery=True,
                 )
             reason = str(exc)
             self._manual(transaction, reason, unsafe_candidate=True, candidate_installed=False)
@@ -816,6 +818,12 @@ class IndexRepairController:
             transaction["candidate_idx"]["size"] == old_idx["size"]
             and transaction["candidate_idx"]["sha256"] == old_idx["sha256"]
         ):
+            if allow_identical_after_tail_recovery:
+                transaction["candidate_identical_after_tail_recovery"] = True
+                self.journal.transition(transaction, "candidate_built")
+                self._create_backups(transaction)
+                self._install_candidate(transaction)
+                return
             reason = (
                 "reconstructed candidate is byte-for-byte identical to the live index; "
                 "the upstream read-only state is not explained by index divergence"

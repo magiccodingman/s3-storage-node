@@ -173,6 +173,29 @@ def test_identical_candidate_is_not_installed_or_backed_up(tmp_path: Path) -> No
     assert "backup_idx_path" not in transaction
 
 
+def test_identical_candidate_after_tail_recovery_is_backed_up_and_validated(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    live_idx = config.index_path / "photos_1.idx"
+    live_sdx = config.index_path / "photos_1.sdx"
+    live_idx.write_bytes(b"same-index")
+    live_sdx.write_bytes(b"same-sorted-index")
+    controller = IndexRepairController(config, HealthState())
+    controller.prepare_offline()
+    install_fake_builder(controller, candidate=b"same-index")
+
+    controller._repair_one(
+        status()["volume_details"][0], generation_id=7, active_transport="cifs-primary",
+        generation_failure_cause="seaweed_volume_health_failure",
+        allow_identical_after_tail_recovery=True,
+    )
+
+    transaction = controller.awaiting()[0]
+    assert transaction["candidate_identical_after_tail_recovery"] is True
+    assert Path(transaction["backup_idx_path"]).read_bytes() == b"same-index"
+    assert Path(transaction["backup_sdx_path"]).read_bytes() == b"same-sorted-index"
+    assert not live_sdx.exists()
+
+
 def test_unsafe_candidate_parks_immediately_without_backup_or_install(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     source = config.volume_path / "photos_1.dat"
