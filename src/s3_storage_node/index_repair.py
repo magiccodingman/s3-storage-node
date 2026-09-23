@@ -15,7 +15,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
-from .index_repair_helper import fingerprint, inspect_index_bounds
 from .logging import event
 from .seaweed_health import all_volumes_readonly
 
@@ -443,6 +442,63 @@ class IndexRepairController:
             raise IndexRepairError(error)
         return payload
 
+    def _run_tail_recovery_helper(
+        self,
+        *,
+        source: Path,
+        staging: Path,
+        base_name: str,
+        collection: str,
+        volume_id: int,
+        live_idx: Path,
+        tail_path: Path,
+        expected_fingerprint: dict[str, Any],
+    ) -> dict[str, Any]:
+        command = [
+            "unshare", "--mount", "--propagation", "private", "--",
+            sys.executable, "-m", "s3_storage_node.index_repair_helper",
+            "--source-dat", str(source),
+            "--staging-dir", str(staging),
+            "--base-name", base_name,
+            "--volume-id", str(volume_id),
+            "--weed-binary", self.config.seaweed.binary,
+            "--uid", str(self.config.appliance.uid),
+            "--gid", str(self.config.appliance.gid),
+            "--recover-incomplete-tail",
+            "--live-index", str(live_idx),
+            "--tail-backup", str(tail_path),
+            "--expected-fingerprint", json.dumps(expected_fingerprint, sort_keys=True),
+            "--maximum-tail-bytes", str(self.config.seaweed.auto_tail_recovery_max_bytes),
+        ]
+        if collection:
+            command.extend(["--collection", collection])
+        process = subprocess.Popen(
+            self.command_builder(command), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=self.config.seaweed.index_repair_timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            raise IndexRepairError(
+                f"tail recovery helper timed out after {self.config.seaweed.index_repair_timeout_seconds} seconds"
+            ) from exc
+        lines = [line for line in stdout.splitlines() if line.strip()]
+        try:
+            payload = json.loads(lines[-1]) if lines else {}
+        except json.JSONDecodeError as exc:
+            raise IndexRepairError(f"tail recovery helper returned invalid output: {stderr[-1024:]}") from exc
+        if not isinstance(payload, dict) or process.returncode != 0 or not payload.get("success"):
+            error = str(
+                payload.get("error") if isinstance(payload, dict) else ""
+            ) or stderr.strip() or "tail recovery helper failed"
+            raise IndexRepairError(error)
+        return payload
+
     @staticmethod
     def _enrich_fingerprint(
         raw: dict[str, Any], *, dataset: str, transport: str, collection: str, volume_id: int,
@@ -813,56 +869,30 @@ class IndexRepairController:
             or maximum_valid_end > offset
         ):
             return False
-        live_bounds = inspect_index_bounds(live_idx, source)
-        if not live_bounds["valid"] or int(live_bounds["maximum_needle_end"]) > offset:
-            return False
-        current = self._enrich_fingerprint(
-            fingerprint(source),
-            dataset=self.config.data_target.sentinel_id,
-            transport=str(transaction["active_transport"]),
-            collection=str(transaction["collection"]),
-            volume_id=int(transaction["volume_id"]),
-        )
-        if current != expected_fingerprint:
-            return False
-
         backup_dir = self.journal.backup_dir / str(transaction["transaction_id"])
         backup_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(backup_dir, 0o700)
         tail_path = backup_dir / f"{transaction['base_name']}.incomplete-tail"
-        with source.open("rb", buffering=0) as source_handle:
-            source_handle.seek(offset)
-            tail = source_handle.read(tail_size + 1)
-        if len(tail) != tail_size:
-            return False
-        tail_hash = hashlib.sha256(tail).hexdigest()
-        if tail_path.exists():
-            existing_tail = _hash_file(tail_path)
-            if existing_tail["size"] != tail_size or existing_tail["sha256"] != tail_hash:
-                return False
-        else:
-            with tail_path.open("xb") as backup_handle:
-                backup_handle.write(tail)
-                backup_handle.flush()
-                os.fsync(backup_handle.fileno())
-            os.chmod(tail_path, 0o600)
-            _fsync_directory(backup_dir)
-        if _hash_file(tail_path)["sha256"] != tail_hash:
-            return False
-        if self._enrich_fingerprint(
-            fingerprint(source),
-            dataset=self.config.data_target.sentinel_id,
-            transport=str(transaction["active_transport"]),
+        recovery = self._run_tail_recovery_helper(
+            source=source,
+            staging=Path(str(transaction["staging_dir"])),
+            base_name=str(transaction["base_name"]),
             collection=str(transaction["collection"]),
             volume_id=int(transaction["volume_id"]),
-        ) != expected_fingerprint:
-            return False
-        with source.open("r+b", buffering=0) as source_handle:
-            source_handle.truncate(offset)
-            source_handle.flush()
-            os.fsync(source_handle.fileno())
+            live_idx=live_idx,
+            tail_path=tail_path,
+            expected_fingerprint={
+                key: value for key, value in expected_fingerprint.items()
+                if key not in {
+                    "dataset_sentinel_id", "active_transport", "collection", "volume_id",
+                }
+            },
+        )
+        if int(recovery.get("offset", -1)) != offset or int(recovery.get("tail_size", -1)) != tail_size:
+            raise IndexRepairManualIntervention("tail recovery helper returned an inconsistent boundary")
+        tail_hash = str(recovery["tail_sha256"])
         recovered_fingerprint = self._enrich_fingerprint(
-            fingerprint(source),
+            recovery["source_fingerprint_after"],
             dataset=self.config.data_target.sentinel_id,
             transport=str(transaction["active_transport"]),
             collection=str(transaction["collection"]),
@@ -875,7 +905,7 @@ class IndexRepairController:
             "size": tail_size,
             "sha256": tail_hash,
             "backup_path": str(tail_path),
-            "needle_id": int(violation["needle_id"]),
+            "needle_id": int(recovery["needle_id"]),
         }
         transaction["recovered_source_fingerprint"] = recovered_fingerprint
         self.journal.transition(

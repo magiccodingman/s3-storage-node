@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import struct
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from s3_storage_node.index_repair_helper import RepairHelperError, inspect_index_bounds
+import s3_storage_node.index_repair_helper as repair_helper
+from s3_storage_node.index_repair_helper import RepairHelperError, fingerprint, inspect_index_bounds
 
 
 def _dat(path: Path, size: int = 128, version: int = 3) -> Path:
@@ -67,3 +70,36 @@ def test_index_bounds_ignores_tombstones_and_remote_markers(tmp_path: Path) -> N
 
     assert result["valid"] is True
     assert result["maximum_needle_end"] == 0
+
+
+def test_recover_incomplete_tail_preserves_bytes_before_truncation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _dat(tmp_path / "photos_1.dat", size=100)
+    live_index = _idx(tmp_path / "photos_1.live.idx", (7, 8, 1))
+    backup = tmp_path / "backups" / "photos_1.incomplete-tail"
+    expected = fingerprint(source)
+    monkeypatch.setattr(repair_helper, "build_candidate", lambda _args: {
+        "success": False,
+        "manual_intervention_required": True,
+        "candidate_bounds": {
+            "source_size": 100,
+            "maximum_entry_offset": 96,
+            "maximum_valid_needle_end": 48,
+            "violations": [{
+                "needle_id": 99, "offset": 96, "size": 9,
+                "end": 136, "bytes_past_eof": 36,
+            }],
+        },
+    })
+    args = SimpleNamespace(
+        source_dat=str(source), live_index=str(live_index), tail_backup=str(backup),
+        expected_fingerprint=json.dumps(expected), maximum_tail_bytes=16,
+    )
+
+    result = repair_helper.recover_incomplete_tail(args)
+
+    assert result["success"] is True
+    assert source.stat().st_size == 96
+    assert backup.read_bytes() == bytes(4)
+    assert result["source_fingerprint_after"] == fingerprint(source)

@@ -212,7 +212,9 @@ def test_unsafe_candidate_parks_immediately_without_backup_or_install(tmp_path: 
     assert "backup_idx_path" not in transaction
 
 
-def test_proven_single_incomplete_tail_is_preserved_and_removed(tmp_path: Path) -> None:
+def test_proven_single_incomplete_tail_is_preserved_and_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config = make_config(tmp_path)
     config.seaweed.auto_tail_recovery_enabled = True
     source = config.volume_path / "photos_1.dat"
@@ -231,6 +233,7 @@ def test_proven_single_incomplete_tail_is_preserved_and_removed(tmp_path: Path) 
         "collection": "photos",
         "volume_id": 1,
         "base_name": "photos_1",
+        "staging_dir": str(config.index_repair_path / "staging" / "tail-test"),
         "source_fingerprint": expected,
     })
     payload = {"candidate_bounds": {
@@ -242,6 +245,17 @@ def test_proven_single_incomplete_tail_is_preserved_and_removed(tmp_path: Path) 
             "end": 136, "bytes_past_eof": 36,
         }],
     }}
+    def recover_helper(**kwargs):
+        tail = source.read_bytes()[96:]
+        kwargs["tail_path"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["tail_path"].write_bytes(tail)
+        with source.open("r+b") as handle:
+            handle.truncate(96)
+        return {
+            "offset": 96, "tail_size": 4, "tail_sha256": __import__("hashlib").sha256(tail).hexdigest(),
+            "needle_id": 99, "source_fingerprint_after": fingerprint(source),
+        }
+    monkeypatch.setattr(controller, "_run_tail_recovery_helper", recover_helper)
 
     recovered = controller._recover_incomplete_tail(
         transaction=transaction, source=source, live_idx=live_idx,
