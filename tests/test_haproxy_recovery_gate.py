@@ -43,8 +43,8 @@ def test_haproxy_bounds_active_and_queued_s3_requests(tmp_path) -> None:
     rendered = render_haproxy(_config(tmp_path)).read_text(encoding="utf-8")
 
     assert "acl s3_read method GET HEAD OPTIONS" in rendered
-    assert "srv_queue(seaweed_s3_read/worker_s3_read) ge 32" in rendered
-    assert "srv_queue(seaweed_s3_write/worker_s3_write) ge 16" in rendered
+    assert "queue(seaweed_s3_read) ge 32" in rendered
+    assert "queue(seaweed_s3_write) ge 16" in rendered
     assert "use_backend seaweed_s3_read if s3_read" in rendered
     assert "option abortonclose" in rendered
     assert "timeout queue 10s" in rendered

@@ -56,8 +56,11 @@ def test_s3_admission_defaults_are_safe_and_bounded(tmp_path: Path) -> None:
     assert config.s3.admission.max_active_read_requests == 16
     assert config.s3.admission.max_active_write_requests == 2
     assert config.s3.admission.max_queued_read_requests == 32
-    assert config.s3.admission.max_queued_write_requests == 16
-    assert config.s3.admission.queue_timeout_seconds == 10
+    assert config.s3.admission.max_queued_write_requests == 4
+    assert config.s3.admission.queue_timeout_seconds == 3
+    assert config.s3.admission.adaptive_enabled is True
+    assert config.s3.admission.slow_probe_seconds == 2
+    assert config.s3.admission.healthy_window_seconds == 300
 
 
 def test_s3_admission_settings_are_configurable(tmp_path: Path) -> None:
@@ -66,6 +69,9 @@ def test_s3_admission_settings_are_configurable(tmp_path: Path) -> None:
             tmp_path,
             '''[s3.admission]
 enabled = true
+adaptive_enabled = false
+slow_probe_seconds = 4
+healthy_window_seconds = 600
 max_active_read_requests = 24
 max_active_write_requests = 3
 max_queued_read_requests = 96
@@ -77,6 +83,9 @@ queue_timeout_seconds = 15
 
     assert config.s3.admission.enabled is True
     assert config.s3.admission.max_active_read_requests == 24
+    assert config.s3.admission.adaptive_enabled is False
+    assert config.s3.admission.slow_probe_seconds == 4
+    assert config.s3.admission.healthy_window_seconds == 600
     assert config.s3.admission.max_active_write_requests == 3
     assert config.s3.admission.max_queued_read_requests == 96
     assert config.s3.admission.max_queued_write_requests == 12
@@ -104,6 +113,8 @@ enabled = false
         ("max_queued_read_requests = 0", "s3.admission.max_queued_read_requests"),
         ("max_queued_write_requests = 0", "s3.admission.max_queued_write_requests"),
         ("queue_timeout_seconds = 0", "s3.admission.queue_timeout_seconds"),
+        ("slow_probe_seconds = 0", "s3.admission.slow_probe_seconds"),
+        ("healthy_window_seconds = 0", "s3.admission.healthy_window_seconds"),
     ],
 )
 def test_s3_admission_rejects_non_positive_limits(

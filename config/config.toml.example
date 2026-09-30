@@ -156,8 +156,11 @@ tls_pem_file = ""
 # Excess requests wait in bounded queues and receive a retryable 503 on overflow.
 [s3.admission]
 enabled = true
+adaptive_enabled = true
+slow_probe_seconds = 2
+healthy_window_seconds = 300
 max_active_read_requests = 16
 max_active_write_requests = 2
 max_queued_read_requests = 32
-max_queued_write_requests = 16
-queue_timeout_seconds = 10
+max_queued_write_requests = 4
+queue_timeout_seconds = 3

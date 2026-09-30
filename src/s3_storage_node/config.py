@@ -251,6 +251,9 @@ def load_config(path: str | os.PathLike[str]) -> Config:
     admission_raw = _table(s3_raw, "admission")
     admission = S3AdmissionConfig(
         enabled=_bool(admission_raw.get("enabled"), "s3.admission.enabled", True),
+        adaptive_enabled=_bool(admission_raw.get("adaptive_enabled"), "s3.admission.adaptive_enabled", True),
+        slow_probe_seconds=_int(admission_raw.get("slow_probe_seconds"), "s3.admission.slow_probe_seconds", 2),
+        healthy_window_seconds=_int(admission_raw.get("healthy_window_seconds"), "s3.admission.healthy_window_seconds", 300),
         max_active_read_requests=_int(
             admission_raw.get("max_active_read_requests"),
             "s3.admission.max_active_read_requests", 16,
@@ -265,12 +268,12 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         ),
         max_queued_write_requests=_int(
             admission_raw.get("max_queued_write_requests"),
-            "s3.admission.max_queued_write_requests", 16,
+            "s3.admission.max_queued_write_requests", 4,
         ),
         queue_timeout_seconds=_int(
             admission_raw.get("queue_timeout_seconds"),
             "s3.admission.queue_timeout_seconds",
-            10,
+            3,
         ),
     )
     _positive(admission.max_active_read_requests, "s3.admission.max_active_read_requests")
@@ -278,6 +281,8 @@ def load_config(path: str | os.PathLike[str]) -> Config:
     _positive(admission.max_queued_read_requests, "s3.admission.max_queued_read_requests")
     _positive(admission.max_queued_write_requests, "s3.admission.max_queued_write_requests")
     _positive(admission.queue_timeout_seconds, "s3.admission.queue_timeout_seconds")
+    _positive(admission.slow_probe_seconds, "s3.admission.slow_probe_seconds")
+    _positive(admission.healthy_window_seconds, "s3.admission.healthy_window_seconds")
 
     s3 = S3Config(
         host=_string(s3_raw.get("host"), "s3.host", "0.0.0.0"),

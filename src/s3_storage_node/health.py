@@ -19,6 +19,8 @@ class HealthState:
         self.failures_total = 0
         self.consecutive_probe_successes = 0
         self.last_probe_at = 0.0
+        self.probe_started_monotonic = 0.0
+        self.admission: dict[str, Any] = {}
         self.last_probe_duration_seconds = 0.0
         self.last_failure_at = 0.0
         self.last_failure = ""
@@ -66,8 +68,17 @@ class HealthState:
         with self._lock:
             self.storage[name] = values
 
+    def start_probe(self) -> None:
+        with self._lock:
+            self.probe_started_monotonic = time.monotonic()
+
+    def set_admission(self, values: dict[str, Any]) -> None:
+        with self._lock:
+            self.admission = dict(values)
+
     def record_probe(self, success: bool, duration_seconds: float, error: str = "") -> None:
         with self._lock:
+            self.probe_started_monotonic = 0.0
             self.last_probe_at = time.time()
             self.last_probe_duration_seconds = duration_seconds
             if success:
@@ -124,6 +135,8 @@ class HealthState:
                 "failures_total": self.failures_total,
                 "consecutive_probe_successes": self.consecutive_probe_successes,
                 "last_probe_at": self.last_probe_at,
+                "probe_started_monotonic": self.probe_started_monotonic,
+                "admission": dict(self.admission),
                 "last_probe_duration_seconds": self.last_probe_duration_seconds,
                 "last_failure_at": self.last_failure_at,
                 "last_failure": self.last_failure,
@@ -226,6 +239,8 @@ class Handler(BaseHTTPRequestHandler):
             f"s3_storage_node_index_repair_current_volume {snapshot['index_repair'].get('current_volume_id', 0)}",
         ]
         generation_counters = snapshot["generation_history"].get("counters", {})
+        for key in ("write_limit", "queue", "active", "backoffs_total", "control_errors_total"):
+            lines.append(f"s3_storage_node_admission_{key} {snapshot['admission'].get(key, 0)}")
         generation_metrics = {
             "generations_created_total": "s3_storage_node_generations_created_total",
             "generations_completed_total": "s3_storage_node_generations_completed_total",
