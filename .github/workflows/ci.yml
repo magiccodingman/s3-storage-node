@@ -92,6 +92,12 @@ jobs:
             -c 'unshare --mount --net -- true && ip link add s3-ci-a type veth peer name s3-ci-b && ip link del s3-ci-a'
       - name: Verify SSHFS tooling is present
         run: docker run --rm --entrypoint /usr/bin/sshfs s3-storage-node:ci --version
+      - name: Verify adaptive admission against real HAProxy
+        run: |
+          docker run --rm --network none --memory 128m --cpus 1 \
+            -v "${{ github.workspace }}:/workspace:ro" \
+            --entrypoint python3 s3-storage-node:ci \
+            /workspace/tests/real_admission_check.py
       - name: Verify pinned SeaweedFS release
         run: docker run --rm --entrypoint /usr/local/bin/weed s3-storage-node:ci version | grep -F '4.44'
       - name: Rebuild real indexes through a read-only private mount namespace

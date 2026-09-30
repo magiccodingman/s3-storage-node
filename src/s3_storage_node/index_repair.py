@@ -19,7 +19,7 @@ from .logging import event
 from .seaweed_health import all_volumes_readonly
 
 
-TERMINAL_PHASES = {"verified", "manual_intervention_required", "resolved_without_install"}
+TERMINAL_PHASES = {"verified", "manual_intervention_required", "resolved_without_install", "tail_recovered"}
 PENDING_VALIDATION_PHASES = {"candidate_installed", "awaiting_upstream_validation"}
 PREINSTALL_PHASES = {
     "detected", "writers_stopped", "source_mounted_readonly", "candidate_building",
@@ -38,6 +38,12 @@ class IndexRepairJournalError(IndexRepairError):
 
 class IndexRepairManualIntervention(IndexRepairError):
     pass
+
+
+class IndexRepairUnsafeCandidate(IndexRepairManualIntervention):
+    def __init__(self, message: str, payload: dict[str, Any]) -> None:
+        self.payload = payload
+        super().__init__(message)
 
 
 class IndexValidationRequired(IndexRepairError):
@@ -432,7 +438,64 @@ class IndexRepairController:
         if process.returncode != 0 or not payload.get("success"):
             error = str(payload.get("error") or stderr.strip() or "index repair helper failed")
             if payload.get("manual_intervention_required"):
-                raise IndexRepairManualIntervention(error)
+                raise IndexRepairUnsafeCandidate(error, payload)
+            raise IndexRepairError(error)
+        return payload
+
+    def _run_tail_recovery_helper(
+        self,
+        *,
+        source: Path,
+        staging: Path,
+        base_name: str,
+        collection: str,
+        volume_id: int,
+        live_idx: Path,
+        tail_path: Path,
+        expected_fingerprint: dict[str, Any],
+    ) -> dict[str, Any]:
+        command = [
+            "unshare", "--mount", "--propagation", "private", "--",
+            sys.executable, "-m", "s3_storage_node.index_repair_helper",
+            "--source-dat", str(source),
+            "--staging-dir", str(staging),
+            "--base-name", base_name,
+            "--volume-id", str(volume_id),
+            "--weed-binary", self.config.seaweed.binary,
+            "--uid", str(self.config.appliance.uid),
+            "--gid", str(self.config.appliance.gid),
+            "--recover-incomplete-tail",
+            "--live-index", str(live_idx),
+            "--tail-backup", str(tail_path),
+            "--expected-fingerprint", json.dumps(expected_fingerprint, sort_keys=True),
+            "--maximum-tail-bytes", str(self.config.seaweed.auto_tail_recovery_max_bytes),
+        ]
+        if collection:
+            command.extend(["--collection", collection])
+        process = subprocess.Popen(
+            self.command_builder(command), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=self.config.seaweed.index_repair_timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            raise IndexRepairError(
+                f"tail recovery helper timed out after {self.config.seaweed.index_repair_timeout_seconds} seconds"
+            ) from exc
+        lines = [line for line in stdout.splitlines() if line.strip()]
+        try:
+            payload = json.loads(lines[-1]) if lines else {}
+        except json.JSONDecodeError as exc:
+            raise IndexRepairError(f"tail recovery helper returned invalid output: {stderr[-1024:]}") from exc
+        if not isinstance(payload, dict) or process.returncode != 0 or not payload.get("success"):
+            error = str(
+                payload.get("error") if isinstance(payload, dict) else ""
+            ) or stderr.strip() or "tail recovery helper failed"
             raise IndexRepairError(error)
         return payload
 
@@ -524,6 +587,7 @@ class IndexRepairController:
         generation_id: int,
         active_transport: str,
         generation_failure_cause: str,
+        allow_identical_after_tail_recovery: bool = False,
     ) -> None:
         volume_id = int(detail["id"])
         collection = str(detail.get("collection") or "")
@@ -715,6 +779,24 @@ class IndexRepairController:
                 "size": int(built["candidate_size"]),
                 "sha256": str(built["candidate_sha256"]),
             }
+        except IndexRepairUnsafeCandidate as exc:
+            if self._recover_incomplete_tail(
+                transaction=transaction,
+                source=source,
+                live_idx=live_idx,
+                expected_fingerprint=source_fingerprint,
+                payload=exc.payload,
+            ):
+                return self._repair_one(
+                    detail,
+                    generation_id=generation_id,
+                    active_transport=active_transport,
+                    generation_failure_cause=generation_failure_cause,
+                    allow_identical_after_tail_recovery=True,
+                )
+            reason = str(exc)
+            self._manual(transaction, reason, unsafe_candidate=True, candidate_installed=False)
+            raise
         except IndexRepairManualIntervention as exc:
             reason = str(exc)
             self._manual(
@@ -736,6 +818,12 @@ class IndexRepairController:
             transaction["candidate_idx"]["size"] == old_idx["size"]
             and transaction["candidate_idx"]["sha256"] == old_idx["sha256"]
         ):
+            if allow_identical_after_tail_recovery:
+                transaction["candidate_identical_after_tail_recovery"] = True
+                self.journal.transition(transaction, "candidate_built")
+                self._create_backups(transaction)
+                self._install_candidate(transaction)
+                return
             reason = (
                 "reconstructed candidate is byte-for-byte identical to the live index; "
                 "the upstream read-only state is not explained by index divergence"
@@ -750,6 +838,93 @@ class IndexRepairController:
         self.journal.transition(transaction, "candidate_built")
         self._create_backups(transaction)
         self._install_candidate(transaction)
+
+    def _recover_incomplete_tail(
+        self,
+        *,
+        transaction: dict[str, Any],
+        source: Path,
+        live_idx: Path,
+        expected_fingerprint: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> bool:
+        """Remove one proven incomplete final record after preserving its exact bytes."""
+
+        if not bool(getattr(self.config.seaweed, "auto_tail_recovery_enabled", False)):
+            return False
+        bounds = payload.get("candidate_bounds")
+        if not isinstance(bounds, dict):
+            return False
+        violations = bounds.get("violations")
+        if not isinstance(violations, list) or len(violations) != 1:
+            return False
+        violation = violations[0]
+        if not isinstance(violation, dict):
+            return False
+        try:
+            offset = int(violation["offset"])
+            source_size = int(bounds["source_size"])
+            maximum_entry_offset = int(bounds["maximum_entry_offset"])
+            maximum_valid_end = int(bounds["maximum_valid_needle_end"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        tail_size = source_size - offset
+        if (
+            offset <= 0
+            or tail_size <= 0
+            or tail_size > int(getattr(self.config.seaweed, "auto_tail_recovery_max_bytes", 16777216))
+            or maximum_entry_offset != offset
+            or maximum_valid_end > offset
+        ):
+            return False
+        backup_dir = self.journal.backup_dir / str(transaction["transaction_id"])
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(backup_dir, 0o700)
+        tail_path = backup_dir / f"{transaction['base_name']}.incomplete-tail"
+        recovery = self._run_tail_recovery_helper(
+            source=source,
+            staging=Path(str(transaction["staging_dir"])),
+            base_name=str(transaction["base_name"]),
+            collection=str(transaction["collection"]),
+            volume_id=int(transaction["volume_id"]),
+            live_idx=live_idx,
+            tail_path=tail_path,
+            expected_fingerprint={
+                key: value for key, value in expected_fingerprint.items()
+                if key not in {
+                    "dataset_sentinel_id", "active_transport", "collection", "volume_id",
+                }
+            },
+        )
+        if int(recovery.get("offset", -1)) != offset or int(recovery.get("tail_size", -1)) != tail_size:
+            raise IndexRepairManualIntervention("tail recovery helper returned an inconsistent boundary")
+        tail_hash = str(recovery["tail_sha256"])
+        recovered_fingerprint = self._enrich_fingerprint(
+            recovery["source_fingerprint_after"],
+            dataset=self.config.data_target.sentinel_id,
+            transport=str(transaction["active_transport"]),
+            collection=str(transaction["collection"]),
+            volume_id=int(transaction["volume_id"]),
+        )
+        if int(recovered_fingerprint["size"]) != offset:
+            raise IndexRepairManualIntervention("incomplete-tail truncation did not reach the proven boundary")
+        transaction["incomplete_tail"] = {
+            "offset": offset,
+            "size": tail_size,
+            "sha256": tail_hash,
+            "backup_path": str(tail_path),
+            "needle_id": int(recovery["needle_id"]),
+        }
+        transaction["recovered_source_fingerprint"] = recovered_fingerprint
+        self.journal.transition(
+            transaction, "tail_recovered", success=True, candidate_installed=False,
+        )
+        event(
+            "warning", "index_repair_incomplete_tail_recovered",
+            volume_id=int(transaction["volume_id"]), offset=offset,
+            tail_size=tail_size, tail_sha256=tail_hash,
+        )
+        return True
 
     def _record_preinstall_failure(self, transaction: dict[str, Any], reason: str) -> None:
         self.journal.transition(transaction, "failed_preinstall", failure_reason=reason)

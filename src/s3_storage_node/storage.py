@@ -93,6 +93,18 @@ def _sshfs_pid_path(target: TargetConfig) -> Path | None:
     return Path(target.ssh_runtime_pid_file) if target.ssh_runtime_pid_file else None
 
 
+def _sshfs_pid_present(pid: int) -> bool:
+    # A terminated direct child can remain in /proc until its parent waits.
+    # Reap only this PID, non-blockingly; never treat a live/non-child task as gone.
+    try:
+        reaped, _status = os.waitpid(pid, os.WNOHANG)
+        if reaped == pid:
+            return False
+    except ChildProcessError:
+        pass
+    return Path(f"/proc/{pid}").exists()
+
+
 def _stop_sshfs_process(target: TargetConfig) -> None:
     pid_path = _sshfs_pid_path(target)
     if pid_path is None:
@@ -118,18 +130,18 @@ def _stop_sshfs_process(target: TargetConfig) -> None:
         pid_path.unlink(missing_ok=True)
         return
     deadline = time.monotonic() + 3
-    while time.monotonic() < deadline and Path(f"/proc/{pid}").exists():
+    while time.monotonic() < deadline and _sshfs_pid_present(pid):
         time.sleep(0.05)
-    if Path(f"/proc/{pid}").exists():
+    if _sshfs_pid_present(pid):
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pid_path.unlink(missing_ok=True)
             return
         deadline = time.monotonic() + 3
-        while time.monotonic() < deadline and Path(f"/proc/{pid}").exists():
+        while time.monotonic() < deadline and _sshfs_pid_present(pid):
             time.sleep(0.05)
-    if Path(f"/proc/{pid}").exists():
+    if _sshfs_pid_present(pid):
         raise StorageError(
             f"SSHFS process {pid} remained after SIGKILL; preserving its PID file and refusing replacement"
         )

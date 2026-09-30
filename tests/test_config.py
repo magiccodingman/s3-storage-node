@@ -66,12 +66,16 @@ def test_loads_valid_path_configuration(tmp_path: Path) -> None:
     assert config.index_path == tmp_path / "state" / "index" / "volume-indexes"
     assert config.index_repair_path == config.index_path / ".s3-storage-node-repair"
     assert config.appliance.shutdown_grace_seconds == 45
-    assert config.appliance.probe_timeout_seconds == 60
+    assert config.appliance.probe_timeout_seconds == 15
     assert config.seaweed.all_readonly_wait_seconds == 75
     assert config.seaweed.auto_index_repair_enabled is True
     assert config.seaweed.index_repair_concurrency == 1
     assert config.seaweed.index_repair_max_volumes == 2
     assert config.seaweed.index_repair_timeout_seconds == 3600
+    assert config.seaweed.auto_tail_recovery_enabled is False
+    assert config.seaweed.auto_tail_recovery_max_bytes == 16777216
+    assert config.seaweed.concurrent_upload_limit_mb == 32
+    assert config.seaweed.inflight_upload_timeout_seconds == 15
 
 
 def test_all_readonly_wait_must_be_positive(tmp_path: Path) -> None:
@@ -255,6 +259,9 @@ def test_expected_readonly_volume_ids_are_validated(tmp_path: Path, value: str) 
         ("index_repair_concurrency", "9"),
         ("index_repair_max_volumes", "0"),
         ("index_repair_timeout_seconds", "0"),
+        ("auto_tail_recovery_max_bytes", "0"),
+        ("concurrent_upload_limit_mb", "0"),
+        ("inflight_upload_timeout_seconds", "0"),
     ],
 )
 def test_index_repair_bounds_are_validated(tmp_path: Path, setting: str, value: str) -> None:
