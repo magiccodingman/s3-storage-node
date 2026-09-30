@@ -110,15 +110,30 @@ def render_haproxy(config: Config) -> Path:
         health_host = "127.0.0.1"
 
     admission_frontend = ""
+    adaptive = getattr(config.s3.admission, "adaptive_enabled", False) and config.s3.admission.enabled
+    write_limit = 1 if adaptive else getattr(config.s3.admission, "max_active_write_requests", 2)
+    if adaptive:
+        (config.appliance.runtime_dir / "admission").mkdir(mode=0o700, parents=True, exist_ok=True)
+    socket_config = (
+        f"  stats socket {config.appliance.runtime_dir}/admission/control.sock mode 600 level admin\n"
+        if adaptive else ""
+    )
     backend_content = ""
     if config.s3.admission.enabled:
         admission_frontend = (
             "  # Reads and writes use independent budgets so bulk uploads cannot starve recovery reads.\n"
             "  acl s3_read method GET HEAD OPTIONS\n"
-            f"  acl s3_read_queue_full srv_queue(seaweed_s3_read/worker_s3_read) ge {config.s3.admission.max_queued_read_requests}\n"
-            f"  acl s3_write_queue_full srv_queue(seaweed_s3_write/worker_s3_write) ge {config.s3.admission.max_queued_write_requests}\n"
-            "  http-request deny deny_status 503 if s3_read s3_read_queue_full\n"
-            "  http-request deny deny_status 503 if !s3_read s3_write_queue_full\n"
+            "  acl s3_bulk_path path_sub /harbor/\n"
+            "  acl s3_bulk_query url_param(uploadId) -m found\n"
+            "  acl s3_bulk_size req.hdr_val(Content-Length) ge 1048576\n"
+            "  http-request set-priority-class int(10) if !s3_read s3_bulk_path\n"
+            "  http-request set-priority-class int(10) if !s3_read s3_bulk_query\n"
+            "  http-request set-priority-class int(10) if !s3_read s3_bulk_size\n"
+            "  capture request header Content-Length len 20\n"
+            f"  acl s3_read_queue_full queue(seaweed_s3_read) ge {config.s3.admission.max_queued_read_requests}\n"
+            f"  acl s3_write_queue_full queue(seaweed_s3_write) ge {config.s3.admission.max_queued_write_requests}\n"
+            '  http-request return status 503 content-type application/xml string "<Error><Code>SlowDown</Code><Message>S3 admission busy; retry later</Message></Error>" hdr Retry-After 3 if s3_read s3_read_queue_full\n'
+            '  http-request return status 503 content-type application/xml string "<Error><Code>SlowDown</Code><Message>S3 admission busy; retry later</Message></Error>" hdr Retry-After 3 if !s3_read s3_write_queue_full\n'
             "  use_backend seaweed_s3_read if s3_read\n"
         )
         common = (
@@ -138,7 +153,7 @@ def render_haproxy(config: Config) -> Path:
             f"{common}"
             f"  server worker_s3_write {backend_host}:{config.seaweed.s3_internal_port} check "
             f"addr {health_host} port {config.appliance.health_port} inter 250ms fall 1 rise 1"
-            f" maxconn {config.s3.admission.max_active_write_requests}"
+            f" maxconn {write_limit}"
             f" maxqueue {config.s3.admission.max_queued_write_requests}\n"
         )
     else:
@@ -152,7 +167,7 @@ def render_haproxy(config: Config) -> Path:
 
     content = f'''global
   log stdout format raw local0
-  maxconn 4096
+{socket_config}  maxconn 4096
 defaults
   log global
   mode http

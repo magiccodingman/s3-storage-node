@@ -8,6 +8,7 @@ import sys
 import time
 
 from . import __version__
+from .admission import AdmissionController
 from .config import Config, ConfigError, load_config
 from .health import HealthState, start_server
 from .logging import event
@@ -35,6 +36,7 @@ class Guardian:
         self.canary_secret: str | None = None
         self.lingering_processes: list[ManagedProcess] = []
         self.helper_children: list[subprocess.Popen[str]] = []
+        self.admission_controller: AdmissionController | None = None
 
     def run(self) -> int:
         self._install_signals()
@@ -104,6 +106,12 @@ class Guardian:
         if self.haproxy and self.haproxy.running():
             return
         path = render_haproxy(self.config)
+        if self.config.s3.admission.enabled and self.config.s3.admission.adaptive_enabled:
+            directory = self.config.appliance.runtime_dir / "admission"
+            os.chmod(directory, 0o700)
+            os.chown(directory, self.config.appliance.uid, self.config.appliance.gid)
+            if self.admission_controller is not None:
+                self.admission_controller.budget.update(time.monotonic(), False)
         self.haproxy = ManagedProcess(
             "haproxy",
             ["/usr/sbin/haproxy", "-W", "-db", "-f", str(path)],
@@ -114,6 +122,9 @@ class Guardian:
         time.sleep(0.25)
         if not self.haproxy.running():
             raise RuntimeError(f"HAProxy exited with code {self.haproxy.exit_code()}")
+        if self.config.s3.admission.enabled and self.config.s3.admission.adaptive_enabled and self.admission_controller is None:
+            self.admission_controller = AdmissionController(self.config, self.health, lambda: self.stopping)
+            self.admission_controller.start()
 
     def _mount_and_enroll_targets(self) -> None:
         self._ensure_no_lingering_processes()
@@ -176,6 +187,7 @@ class Guardian:
 
     def _probe_targets(self, full: bool) -> None:
         started = time.monotonic()
+        self.health.start_probe()
         try:
             for target in self.config.active_targets:
                 result = self._run_probe(target.name, full)

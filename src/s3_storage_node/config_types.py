@@ -128,11 +128,14 @@ class SeaweedConfig:
 @dataclass(frozen=True)
 class S3AdmissionConfig:
     enabled: bool = True
+    adaptive_enabled: bool = True
+    slow_probe_seconds: int = 2
+    healthy_window_seconds: int = 300
     max_active_read_requests: int = 16
     max_active_write_requests: int = 2
     max_queued_read_requests: int = 32
-    max_queued_write_requests: int = 16
-    queue_timeout_seconds: int = 10
+    max_queued_write_requests: int = 4
+    queue_timeout_seconds: int = 3
 
 
 @dataclass(frozen=True)

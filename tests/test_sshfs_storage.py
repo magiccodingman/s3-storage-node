@@ -209,6 +209,27 @@ def test_sshfs_pid_file_is_preserved_when_process_cannot_be_reaped(
     assert killed == [(321, storage.signal.SIGTERM), (321, storage.signal.SIGKILL)]
 
 
+def test_sshfs_exit_reaps_only_the_expected_direct_child(monkeypatch):
+    calls = []
+    def waitpid(pid, options):
+        calls.append((pid, options))
+        return pid, 0
+    monkeypatch.setattr(storage.os, "waitpid", waitpid)
+    assert storage._sshfs_pid_present(321) is False
+    assert calls == [(321, storage.os.WNOHANG)]
+
+
+@pytest.mark.parametrize("direct_child", [True, False])
+def test_sshfs_running_pid_remains_present(monkeypatch, direct_child):
+    def waitpid(pid, options):
+        if not direct_child:
+            raise ChildProcessError
+        return 0, 0
+    monkeypatch.setattr(storage.os, "waitpid", waitpid)
+    monkeypatch.setattr(Path, "exists", lambda path: True)
+    assert storage._sshfs_pid_present(321) is True
+
+
 def test_sshfs_unmount_prefers_clean_detach(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     value = key_target(tmp_path)
     mounted = SimpleNamespace(filesystem="fuse.sshfs", source=value.source)
