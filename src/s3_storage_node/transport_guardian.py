@@ -73,6 +73,17 @@ class Guardian(GenerationGuardian):
         super()._begin_generation()
         self._publish_transport()
 
+    def _terminate_generation(self, reason: str, **kwargs) -> bool:
+        transport = self._transport_failure_name or self.active_transport
+        fenced = super()._terminate_generation(reason, **kwargs)
+        alive = [p for p in self.lingering_processes if p.running()]
+        helpers = [p for p in self.helper_children if p.poll() is None]
+        if fenced and transport and self.transport_selector is not None and (alive or helpers):
+            self.transport_selector.quarantine(transport, reason)
+            event("error", "storage_transport_quarantined", transport=transport, reason=reason)
+            self._publish_transport()
+        return fenced
+
     def _publish_transport(self) -> None:
         if self.transport_selector is None or self.failover is None:
             return
@@ -84,6 +95,7 @@ class Guardian(GenerationGuardian):
             "failback_policy": self.failover.failback_policy,
             "requested_transport": status.get("requested", ""),
             "ordered_transports": ",".join(self.failover.ordered_names),
+            "quarantined_transports": ",".join(sorted(status.get("quarantined", {}))),
             "failure_domains": 1,
             "startup_verification_enabled": 1 if self.failover.verify_all_transports_on_startup else 0,
             "startup_verification_pending": 1 if self._startup_verification_pending else 0,
@@ -149,6 +161,9 @@ class Guardian(GenerationGuardian):
         verified: list[str] = []
         try:
             for transport in self.failover.ordered_names:
+                if transport in self.transport_selector.status().get("quarantined", {}):
+                    event("warning", "startup_verification_skipped_quarantined_transport", transport=transport)
+                    continue
                 self._verify_transport_on_startup(transport)
                 verified.append(transport)
             self.transport_selector.record_startup_verification(

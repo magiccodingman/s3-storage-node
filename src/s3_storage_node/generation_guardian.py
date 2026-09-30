@@ -21,6 +21,7 @@ from .index_repair import (
     IndexValidationRequired,
 )
 from .logging import event
+from .recovery_diagnostics import capture
 from .processes import ManagedProcess, wait_for_tcp
 from .s3check import run_canary
 from .seaweed_health import UnexpectedReadonlyVolumes
@@ -111,6 +112,9 @@ class Guardian(BaseGuardian):
                         self.stopping = True
                         break
                     self._retire_generation()
+                    self._wait_for_blocked_cleanup()
+                    if self.stopping:
+                        break
                     attempt = self.health.increment_recovery()
                     event("warning", "recovery_wait", seconds=delay, attempt=attempt)
                     self._interruptible_sleep(delay)
@@ -161,6 +165,29 @@ class Guardian(BaseGuardian):
         control.mkdir(parents=True, exist_ok=True)
         os.chown(control, 0, 0)
         os.chmod(control, 0o700)
+
+    def _wait_for_blocked_cleanup(self) -> None:
+        started = time.time()
+        announced = False
+        while not self.stopping:
+            alive = [p for p in self.lingering_processes if p.running()]
+            self._reap_helper_children()
+            helpers = [p for p in self.helper_children if p.poll() is None]
+            if not alive and not helpers:
+                self.health.set_blocked_recovery({})
+                if announced:
+                    event("info", "blocked_recovery_cleared")
+                return
+            pids = [p.process.pid for p in alive if p.process is not None] + [p.pid for p in helpers]
+            self.health.set("HOST_RECOVERY_REQUIRED", False,
+                            "fenced tasks remain blocked; host cleanup may be required; replacement writers prohibited")
+            self.health.set_blocked_recovery({"since": started, "elapsed_seconds": time.time() - started,
+                                            "pids": pids, "transport": getattr(self, "active_transport", ""),
+                                            "diagnostics_dir": str(self.config.appliance.state_dir / "guardian" / "diagnostics")})
+            if not announced:
+                event("error", "host_recovery_required", pids=pids)
+                announced = True
+            self._interruptible_sleep(5)
 
     def _prepare_directories(self) -> None:
         state = self.config.appliance.state_dir
@@ -246,6 +273,7 @@ class Guardian(BaseGuardian):
     def _fence_generation(self, reason: str) -> bool:
         if self.generation is None:
             return True
+
         self.health.set("FENCING", False, reason)
         try:
             self.generation.fence(reason)
@@ -274,6 +302,9 @@ class Guardian(BaseGuardian):
             self._repair_targets(unmount_all=unmount_all)
             return True
 
+        if cause != "container_shutdown":
+            capture(self.config.appliance.state_dir / "guardian" / "diagnostics",
+                    self.generation.generation, "before-drain")
         drain_deadline = time.monotonic() + self.config.appliance.shutdown_grace_seconds
         processes_stopped = self._stop_seaweed(deadline=drain_deadline)
         detached = False
@@ -296,6 +327,8 @@ class Guardian(BaseGuardian):
                 generation=self.generation.generation, cause=cause, reason=reason,
                 processes_stopped=processes_stopped, storage_detached=detached,
             )
+            capture(self.config.appliance.state_dir / "guardian" / "diagnostics",
+                    self.generation.generation, "before-fence")
             fenced = self._fence_generation(reason)
             self._repair_targets(unmount_all=unmount_all)
 
