@@ -60,7 +60,7 @@ A queue rejection or queue timeout:
 
 Clients should treat the returned `503` as retryable and use exponential backoff with jitter. The client-side request timeout must be longer than the configured queue timeout plus the expected execution time of the S3 operation, otherwise the client may abandon a request before HAProxy can forward it.
 
-Queue-full admission responses include `Retry-After: 3`. HAProxy's native queue-timeout and offline responses remain retryable 503s but do not necessarily include that header. Not all SDKs honor Retry-After; clients still need bounded retries with jitter.
+Queue-full admission responses include an S3 XML `SlowDown` error and `Retry-After: 3`. HAProxy's native queue-timeout and offline responses remain retryable 503s but do not necessarily include that header. Not all SDKs honor Retry-After; clients still need bounded retries with jitter.
 
 ## Adaptive feedback and queue fairness
 

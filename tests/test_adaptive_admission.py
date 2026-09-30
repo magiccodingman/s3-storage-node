@@ -36,6 +36,7 @@ def test_priority_and_runtime_socket_rendering(tmp_path):
     assert "set-priority-class int(10) if !s3_read s3_bulk_path" in content
     assert "set-priority-class int(10) if !s3_read s3_bulk_query" in content
     assert "hdr Retry-After 3" in content
+    assert "<Code>SlowDown</Code>" in content
     assert "timeout queue 3s" in content
 
 

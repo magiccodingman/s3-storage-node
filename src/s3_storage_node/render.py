@@ -132,8 +132,8 @@ def render_haproxy(config: Config) -> Path:
             "  capture request header Content-Length len 20\n"
             f"  acl s3_read_queue_full queue(seaweed_s3_read) ge {config.s3.admission.max_queued_read_requests}\n"
             f"  acl s3_write_queue_full queue(seaweed_s3_write) ge {config.s3.admission.max_queued_write_requests}\n"
-            '  http-request return status 503 content-type text/plain string "S3 admission busy; retry later" hdr Retry-After 3 if s3_read s3_read_queue_full\n'
-            '  http-request return status 503 content-type text/plain string "S3 admission busy; retry later" hdr Retry-After 3 if !s3_read s3_write_queue_full\n'
+            '  http-request return status 503 content-type application/xml string "<Error><Code>SlowDown</Code><Message>S3 admission busy; retry later</Message></Error>" hdr Retry-After 3 if s3_read s3_read_queue_full\n'
+            '  http-request return status 503 content-type application/xml string "<Error><Code>SlowDown</Code><Message>S3 admission busy; retry later</Message></Error>" hdr Retry-After 3 if !s3_read s3_write_queue_full\n'
             "  use_backend seaweed_s3_read if s3_read\n"
         )
         common = (
