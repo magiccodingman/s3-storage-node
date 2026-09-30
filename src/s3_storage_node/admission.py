@@ -71,7 +71,7 @@ class AdmissionController:
         admission = config.s3.admission
         self.budget = WriteBudget(admission.max_active_write_requests, admission.healthy_window_seconds)
         self.errors = 0
-        self.path = config.appliance.runtime_dir / "admission.sock"
+        self.path = config.appliance.runtime_dir / "admission" / "control.sock"
 
     def tick(self) -> None:
         snapshot = self.health.snapshot()

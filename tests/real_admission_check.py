@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import http.client
 import io
+import os
 import socket
 import subprocess
 import tempfile
@@ -78,6 +79,7 @@ def main():
             client.close()
     try:
         with tempfile.TemporaryDirectory(prefix="s3-admission-") as directory:
+            os.chmod(directory, 0o755)
             config = S(
                 appliance=S(runtime_dir=Path(directory), health_host="127.0.0.1",
                             health_port=health_server.server_port, probe_interval_seconds=5, probe_timeout_seconds=15),
@@ -85,11 +87,14 @@ def main():
                 seaweed=S(s3_internal_port=worker.server_port), worker_endpoint_host="127.0.0.1",
             )
             path = render_haproxy(config)
-            subprocess.run(["/usr/sbin/haproxy", "-c", "-f", str(path)], check=True)
-            proxy = subprocess.Popen(["/usr/sbin/haproxy", "-db", "-f", str(path)], stdout=subprocess.DEVNULL)
+            # Match the production privilege drop, not merely a root-only configuration check.
+            os.chown(Path(directory) / "admission", 10001, 10001)
+            subprocess.run(["/usr/sbin/haproxy", "-c", "-f", str(path)], check=True, user=10001, group=10001)
+            proxy = subprocess.Popen(["/usr/sbin/haproxy", "-db", "-f", str(path)], stdout=subprocess.DEVNULL, user=10001, group=10001)
             try:
-                sock = config.appliance.runtime_dir / "admission.sock"
+                sock = config.appliance.runtime_dir / "admission" / "control.sock"
                 wait_for(sock.exists)
+                assert sock.stat().st_mode & 0o777 == 0o600
                 def backend_ready():
                     rows = csv.DictReader(io.StringIO(runtime_command(sock, "show stat").removeprefix("# ")))
                     return any(r.get("pxname") == "seaweed_s3_write" and r.get("svname") == "worker_s3_write" and r.get("status") == "UP" for r in rows)

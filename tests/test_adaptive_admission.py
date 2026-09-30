@@ -31,7 +31,7 @@ def test_priority_and_runtime_socket_rendering(tmp_path):
         seaweed=SimpleNamespace(s3_internal_port=18333), worker_endpoint_host="169.254.254.2",
     )
     content = render_haproxy(config).read_text()
-    assert f"stats socket {tmp_path}/admission.sock mode 600 level admin" in content
+    assert f"stats socket {tmp_path}/admission/control.sock mode 600 level admin" in content
     assert "maxconn 1 maxqueue 4" in content
     assert "set-priority-class int(10) if !s3_read s3_bulk_path" in content
     assert "set-priority-class int(10) if !s3_read s3_bulk_query" in content

@@ -112,8 +112,10 @@ def render_haproxy(config: Config) -> Path:
     admission_frontend = ""
     adaptive = getattr(config.s3.admission, "adaptive_enabled", False) and config.s3.admission.enabled
     write_limit = 1 if adaptive else getattr(config.s3.admission, "max_active_write_requests", 2)
+    if adaptive:
+        (config.appliance.runtime_dir / "admission").mkdir(mode=0o700, parents=True, exist_ok=True)
     socket_config = (
-        f"  stats socket {config.appliance.runtime_dir}/admission.sock mode 600 level admin\n"
+        f"  stats socket {config.appliance.runtime_dir}/admission/control.sock mode 600 level admin\n"
         if adaptive else ""
     )
     backend_content = ""
