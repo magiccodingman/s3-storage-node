@@ -22,6 +22,11 @@ only the per-server queue, missing requests in the backend queue. The new ACL
 uses the total backend queue, including server queues. Adaptive admission and
 small-operation queue priority complement the existing recovery safeguards.
 
+Privileged CI also exposed an existing SSHFS cleanup race: an exited direct child
+can remain visible in `/proc` until its parent waits, causing a false blocked-task
+failure. Cleanup now attempts a nonblocking wait for that exact PID. Live or
+non-child processes still retain the prior conservative refusal-to-replace guard.
+
 ## Before the authorized swap
 
 1. Confirm PR CI, including Docker build, real HAProxy admission testing, namespace
