@@ -318,6 +318,7 @@ Protect configuration, CIFS credentials, SSH private keys, trusted host keys, S3
 - [Worker-generation fencing](docs/worker-generation-fencing.md)
 - [Exclusive CIFS-to-SSHFS failover](docs/exclusive-transport-failover.md)
 - [Bounded S3 admission control](docs/s3-admission-control.md)
+- [Kernel-blocked transport recovery and quarantine](docs/blocked-transport-recovery.md)
 - [Security model](docs/security.md)
 - [Release workflow](docs/releasing.md)
 

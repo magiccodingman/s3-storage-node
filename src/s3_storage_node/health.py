@@ -21,6 +21,7 @@ class HealthState:
         self.last_probe_at = 0.0
         self.probe_started_monotonic = 0.0
         self.admission: dict[str, Any] = {}
+        self.blocked_recovery: dict[str, Any] = {}
         self.last_probe_duration_seconds = 0.0
         self.last_failure_at = 0.0
         self.last_failure = ""
@@ -75,6 +76,10 @@ class HealthState:
     def set_admission(self, values: dict[str, Any]) -> None:
         with self._lock:
             self.admission = dict(values)
+
+    def set_blocked_recovery(self, values: dict[str, Any]) -> None:
+        with self._lock:
+            self.blocked_recovery = dict(values)
 
     def record_probe(self, success: bool, duration_seconds: float, error: str = "") -> None:
         with self._lock:
@@ -137,6 +142,7 @@ class HealthState:
                 "last_probe_at": self.last_probe_at,
                 "probe_started_monotonic": self.probe_started_monotonic,
                 "admission": dict(self.admission),
+                "blocked_recovery": dict(self.blocked_recovery),
                 "last_probe_duration_seconds": self.last_probe_duration_seconds,
                 "last_failure_at": self.last_failure_at,
                 "last_failure": self.last_failure,
@@ -198,7 +204,7 @@ class Handler(BaseHTTPRequestHandler):
             "# HELP s3_storage_node_manual_intervention_required Whether recovery is parked for operator review.",
             "# TYPE s3_storage_node_manual_intervention_required gauge",
             "s3_storage_node_manual_intervention_required "
-            f"{1 if snapshot['state'] == 'MANUAL_INTERVENTION_REQUIRED' else 0}",
+            f"{1 if snapshot['state'] in {'MANUAL_INTERVENTION_REQUIRED', 'HOST_RECOVERY_REQUIRED'} else 0}",
             "# TYPE s3_storage_node_consecutive_probe_successes gauge",
             f"s3_storage_node_consecutive_probe_successes {snapshot['consecutive_probe_successes']}",
             "# TYPE s3_storage_node_last_probe_duration_seconds gauge",

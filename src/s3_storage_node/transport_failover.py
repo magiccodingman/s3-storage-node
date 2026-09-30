@@ -382,17 +382,24 @@ class TransportSelector:
     def _load(self) -> dict[str, Any]:
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             payload = {}
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TransportFailoverError(f"cannot safely read transport state: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise TransportFailoverError("transport state must be an object")
         failed = payload.get("failed", {})
         if not isinstance(failed, dict):
             failed = {}
+        quarantined = payload.get("quarantined", {})
+        if not isinstance(quarantined, dict):
+            raise TransportFailoverError("transport quarantine state must be an object")
         verified = payload.get("startup_verified_transports", [])
         if not isinstance(verified, list) or not all(isinstance(item, str) for item in verified):
             verified = []
         return {
             "active": payload.get("active", ""), "requested": payload.get("requested", ""),
-            "failed": failed, "last_success_at": payload.get("last_success_at", 0.0),
+            "failed": failed, "quarantined": quarantined, "last_success_at": payload.get("last_success_at", 0.0),
             "startup_verification_fingerprint": payload.get("startup_verification_fingerprint", ""),
             "startup_verified_at": payload.get("startup_verified_at", 0.0),
             "startup_verified_transports": verified, "updated_at": payload.get("updated_at", 0.0),
@@ -421,6 +428,8 @@ class TransportSelector:
             state = self._load()
             requested = str(state.get("requested", ""))
             if requested:
+                if requested in state["quarantined"]:
+                    raise TransportFailoverError(f"transport {requested} is quarantined; explicitly clear quarantine first")
                 if not self.config.contains(requested):
                     raise TransportFailoverError(f"requested transport is no longer configured: {requested}")
                 state["active"] = requested
@@ -429,11 +438,13 @@ class TransportSelector:
                 return requested
             active = str(state.get("active", ""))
             failed = state["failed"]
-            if active and self.config.contains(active) and active not in failed:
+            if active and self.config.contains(active) and active not in failed and active not in state["quarantined"]:
                 return active
             candidates: list[str] = []
             cooling: list[tuple[float, str]] = []
             for name in self.config.ordered_names:
+                if name in state["quarantined"]:
+                    continue
                 failure = failed.get(name)
                 if not isinstance(failure, dict):
                     candidates.append(name)
@@ -444,6 +455,8 @@ class TransportSelector:
                 else:
                     cooling.append((available_at, name))
             if not candidates:
+                if not cooling:
+                    raise TransportFailoverError("all configured transports are quarantined; operator clearance required")
                 available_at, name = min(cooling)
                 remaining = max(1, int(available_at - now + 0.999))
                 raise TransportFailoverError(
@@ -463,6 +476,25 @@ class TransportSelector:
             state["active"] = name
             self._save(state)
 
+    def quarantine(self, name: str, reason: str) -> None:
+        if not self.config.contains(name):
+            raise TransportFailoverError(f"unknown transport: {name}")
+        with self._locked():
+            state = self._load()
+            state["quarantined"][name] = {"at": time.time(), "reason": reason[:1000]}
+            state["startup_verification_fingerprint"] = ""
+            self._save(state)
+
+    def clear_quarantine(self, name: str) -> None:
+        if not self.config.contains(name):
+            raise TransportFailoverError(f"unknown transport: {name}")
+        with self._locked():
+            state = self._load()
+            state["quarantined"].pop(name, None)
+            state["startup_verification_fingerprint"] = ""
+            # Clearance is not a transport switch or proof that old writers are gone.
+            self._save(state)
+
     def record_success(self, name: str, now: float | None = None) -> None:
         with self._locked():
             state = self._load()
@@ -476,6 +508,8 @@ class TransportSelector:
             raise TransportFailoverError(f"unknown transport: {name}")
         with self._locked():
             state = self._load()
+            if name in state["quarantined"]:
+                raise TransportFailoverError(f"transport {name} is quarantined; explicitly clear quarantine first")
             state["requested"] = "" if state.get("active") == name else name
             self._save(state)
 

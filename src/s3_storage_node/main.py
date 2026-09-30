@@ -55,6 +55,13 @@ def parser() -> argparse.ArgumentParser:
     select = subcommands.add_parser("transport-select", help="request a controlled transport switch")
     select.add_argument("--config", default="/etc/s3-storage-node/config.toml")
     select.add_argument("--transport", required=True)
+    clear = subcommands.add_parser("transport-clear-quarantine", help="authorize reuse of a quarantined transport (does not bypass writer fencing)")
+    clear.add_argument("--config", default="/etc/s3-storage-node/config.toml")
+    clear.add_argument("--transport", required=True)
+    quarantine = subcommands.add_parser("transport-quarantine", help="persistently exclude a transport (does not terminate current writers)")
+    quarantine.add_argument("--config", default="/etc/s3-storage-node/config.toml")
+    quarantine.add_argument("--transport", required=True)
+    quarantine.add_argument("--reason", required=True)
 
     validate = subcommands.add_parser("validate", help="validate configuration")
     validate.add_argument("--config", default="/etc/s3-storage-node/config.toml")
@@ -133,11 +140,15 @@ def main(argv: list[str] | None = None) -> int:
         except (ConfigError, IndexRepairError, OSError, ValueError) as exc:
             print(str(exc), file=sys.stderr)
             return 1
-    if command in {"transport-status", "transport-select"}:
+    if command in {"transport-status", "transport-select", "transport-clear-quarantine", "transport-quarantine"}:
         try:
             _config, selector = _selector(args.config)
             if command == "transport-select":
                 selector.request(args.transport)
+            elif command == "transport-clear-quarantine":
+                selector.clear_quarantine(args.transport)
+            elif command == "transport-quarantine":
+                selector.quarantine(args.transport, args.reason)
             print(json.dumps(selector.status(), sort_keys=True))
             return 0
         except (ConfigError, TransportFailoverError, OSError, ValueError) as exc:
