@@ -23,6 +23,237 @@ S3 Storage Node gives that storage an explicit safety boundary.
 
 This does not make a remote filesystem equivalent to an enterprise local disk array. It makes failure explicit and prevents the node from claiming success while its guarded storage path is unsafe.
 
+## Should You Use This?
+
+Before going any further, I want to be very honest about this project.
+
+**You probably shouldn't use it.**
+
+I know. That's a strange thing to say in the README of something I spent considerable time building. But there's a reason this project exists, and understanding that reason is important before deciding whether it's right for you.
+
+This project was born out of necessity, limited resources, and a healthy distrust of network-mounted filesystems.
+
+It was never intended to compete with real S3 object storage. It was intended to make an otherwise questionable storage arrangement as safe, reliable, and recoverable as I could reasonably make it.
+
+And, surprisingly, it got pretty far.
+
+### 1. Can you afford real S3 storage?
+
+If the answer is yes, **seriously consider using that instead.**
+
+Services designed to provide S3-compatible object storage don't require you to put an object storage engine on top of a remote network-mounted filesystem.
+
+This project does.
+
+That introduces an entire category of problems that wouldn't otherwise exist: disconnected mounts, stalled I/O, filesystem inconsistencies, broken processes, metadata issues, and situations where the operating system itself doesn't behave the way you'd like.
+
+I have spent enough time dealing with network-mounted filesystems to develop a very simple philosophy:
+
+**Never trust a network mount to behave correctly, especially when something goes wrong.**
+
+Much of this project's complexity comes directly from lessons learned the hard way.
+
+If you can avoid introducing a network filesystem into your S3 storage path, I strongly recommend doing so.
+
+### 2. Why did I build this, then?
+
+**Because the economics were ridiculous.**
+
+In 2026, storage hardware and infrastructure costs were becoming increasingly difficult to justify on a limited budget.
+
+One of the few genuinely affordable high-capacity storage options I could find was the Hetzner Storage Box.
+
+At the time, my setup cost approximately:
+
+| Component | Monthly cost |
+|---|---:|
+| Hetzner Storage Box — 20 TB | $46.00 |
+| Hetzner VPS — 2 CPU threads, 4 GiB RAM | $6.49 |
+| **Total** | **$52.49** |
+
+That's approximately **$0.00262 per GB per month**, using 20,000 GB of advertised capacity.
+
+For someone who needed substantial storage without substantial spending, that was extremely attractive.
+
+There was just one problem.
+
+I needed S3-compatible storage, and the Storage Box was a network-accessible filesystem.
+
+So I did what any reasonable person would do.
+
+I put SeaweedFS on top of it, wrapped it in a custom management system, and spent an unreasonable amount of time teaching it how not to destroy itself.
+
+The result is this project.
+
+### 3. Understand what this project is actually trying to accomplish
+
+The primary goal was never maximum performance.
+
+It was **survival and recovery**.
+
+I knew from the beginning that putting an S3 service over a network-mounted filesystem was asking for trouble.
+
+So rather than assuming the filesystem would behave, I designed around the assumption that it eventually wouldn't.
+
+What happens when the mount disappears?
+
+What happens when I/O hangs indefinitely?
+
+What happens when the storage comes back but isn't actually healthy?
+
+What happens when SeaweedFS becomes unresponsive?
+
+What happens when a worker refuses to terminate?
+
+What happens when the machine runs out of memory under heavy load?
+
+What happens when storage appears healthy but isn't safe to write to?
+
+These aren't hypothetical concerns. They're the kinds of problems that motivated the safeguards in this repository.
+
+The result includes mountpoint protections, dataset identity verification, health monitoring, fail-closed behavior, worker isolation, recovery mechanisms, and admission control.
+
+The philosophy is simple:
+
+**If something goes wrong, stop accepting work, protect the data, recover if possible, and only reopen when the storage is demonstrably healthy.**
+
+That doesn't make the underlying architecture ideal.
+
+It makes an inherently fragile arrangement considerably more survivable.
+
+### 4. How far did I actually push this?
+
+Much further than I originally intended.
+
+For a while, this was serving real workloads across my small-business infrastructure.
+
+Among other things, I used it for:
+
+- GitLab and Harbor container registry storage
+- PostgreSQL backups across approximately 16–20 databases
+- Proxmox-related backups covering roughly 24 virtual machines
+- Various application artifacts and other backup workloads
+
+Backup schedules ranged from approximately every 30 minutes to hourly, daily, and weekly operations.
+
+The biggest challenge wasn't constant traffic.
+
+**It was burst traffic.**
+
+Everything could be relatively quiet, and then multiple backup jobs, registry operations, and infrastructure processes would suddenly start hitting the same storage backend.
+
+Harbor and Proxmox overlapping were particularly good at exposing problems.
+
+And I exposed plenty of them.
+
+Over time, I repeatedly pushed the system beyond what its tiny VPS could comfortably handle, discovered failure modes, and added protections.
+
+Eventually, it became remarkably good at recovering.
+
+Under extreme load, it could still slow down, reject requests, or temporarily become unavailable. But it increasingly learned how to do those things without completely falling apart.
+
+Some of the later benchmarks demonstrated approximately:
+
+- 73 MiB/s large-object writes
+- 95 MiB/s large-object reads
+- 232 small-object writes per second
+- 26,566 mixed operations without errors
+- Survival under 128 concurrent large-object reads, with substantial overload errors but without an out-of-memory crash
+
+For a 2-thread, 4 GiB VPS backed by a remote CIFS filesystem, I was genuinely impressed.
+
+**But surviving extreme workloads is not the same thing as being suitable for them.**
+
+And that's an important distinction.
+
+### 5. There are important limitations
+
+First, this is not a replacement for a conventional, professionally operated object storage service.
+
+Second, I strongly discourage treating multiple network-mounted storage targets as if they automatically provide a reliable distributed SeaweedFS cluster.
+
+I haven't validated that kind of architecture with this project, and it's not what the appliance is designed to supervise.
+
+If you're building a larger system, I recommend keeping replication, routing, and storage orchestration above these individual nodes.
+
+In my own environment, I used a separate S3 Orchestrator project in front of the storage nodes rather than expecting the nodes themselves to provide a complete distributed storage solution.
+
+Third, your network topology matters enormously.
+
+My performance results came from running the VPS in the same Hetzner datacenter environment as the Storage Box.
+
+Accessing a Storage Box across a different network path can produce dramatically different results.
+
+**Do not assume my benchmark results represent what you'll get from an arbitrary VPS or remote location.**
+
+Finally, this system can still become unavailable.
+
+The recovery mechanisms are intended to prevent unsafe behavior and restore service where possible. They do not guarantee uninterrupted availability, successful requests during overload, or immunity from data loss.
+
+You still need independent backups, monitoring, and a realistic understanding of the underlying storage.
+
+### 6. Why did I stop using it?
+
+I eventually outgrew it.
+
+My infrastructure expanded, the workloads became heavier, and the value of using more conventional storage started outweighing the savings.
+
+The system had become substantially more stable than I expected, but I was asking increasingly unreasonable things of an architecture that was originally designed to save money.
+
+The final deciding factor was compliance.
+
+My business operates in an environment with specific compliance requirements, and as I approached actual production use, I realized this storage arrangement wasn't suitable for those requirements.
+
+That was the end of the road for my own deployment.
+
+I moved on to storage solutions better suited to my operational and compliance needs.
+
+**I didn't stop using this because the project was worthless. I stopped because my requirements changed.**
+
+And I think that's an important distinction.
+
+### 7. So who is this actually for?
+
+I think this project makes sense for a fairly specific kind of person.
+
+Someone who:
+
+- Needs a substantial amount of inexpensive storage
+- Already has access to a network-mounted storage service or appliance
+- Needs an S3-compatible interface over that storage
+- Has modest or intermittent workloads
+- Can tolerate occasional downtime and recovery periods
+- Understands the operational risks involved
+- Is comfortable maintaining and troubleshooting Linux storage infrastructure
+
+It may be useful for personal infrastructure, homelabs, secondary backup destinations, archival workloads, and certain cost-sensitive environments.
+
+I would be much more hesitant to recommend it for high-availability applications, latency-sensitive workloads, compliance-sensitive production data, or anything where temporary storage unavailability would cause serious problems.
+
+And if your only reason for considering this project is saving a few dollars each month, I'd strongly encourage you to calculate whether those savings are worth the additional complexity.
+
+### Final Thoughts
+
+I'm genuinely proud of this project.
+
+It's a ridiculous architecture. I knew that when I started, and I certainly knew it by the time I finished.
+
+But it's also the result of taking a bad idea seriously enough to understand its failure modes and engineer around them.
+
+It taught me a great deal about network filesystems, storage engines, Linux process isolation, failure recovery, resource management, and the difference between a system that works and a system that survives when things stop working.
+
+And for a while, it provided an enormous amount of storage for approximately $52.49 per month.
+
+That's pretty remarkable.
+
+**Would I recommend building your infrastructure this way if you have better options? No.**
+
+**Am I impressed by how far this particular monstrosity got? Absolutely.**
+
+If you understand what you're getting into, have a legitimate reason to use network-backed storage, and can accept the tradeoffs, this project might be useful to you.
+
+Just remember: the entire reason it has so many safety mechanisms is that I never trusted the underlying architecture in the first place.
+
 ## Architecture
 
 ```text
